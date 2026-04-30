@@ -22,26 +22,23 @@ Claude Code                     iSpeak                      iAgent
 ## 全新部署
 
 ```bash
-# 1. 编译
 cd /Users/admin/iCode/iSpeak
-go build -o iSpeak .
+make deploy                                     # 一键：编译 + 安装 + 配置 + 自启
+# 编辑 ~/.config/iSpeak/config.json 填入 TTS 凭证
+```
 
-# 2. 安装二进制
-sudo cp iSpeak /usr/local/bin/iSpeak
-sudo ln -sf /Users/admin/iCode/iSpeak/speak /usr/local/bin/speak
+分步操作：
 
-# 3. 部署配置
-mkdir -p ~/.config/iSpeak
-cp configs/config.example.json ~/.config/iSpeak/config.json
-# 编辑 ~/.config/iSpeak/config.json 填入真实 TTS 凭证
-cp configs/hook-speak.sh ~/.config/iSpeak/hook-speak.sh
-
-# 4. 部署自启动
-cp configs/com.iSpeak.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.iSpeak.plist
-
-# 5. 配置 Claude Code Hook
-# 在 ~/.claude/settings.json 中追加 Stop hook（见下方"Claude Code 集成"）
+```bash
+make build      # 编译
+make install    # 安装到 /usr/local/bin
+make deploy     # 部署配置 + 自启动
+make start      # 启动
+make stop       # 停止
+make restart    # 重启
+make log        # 查看日志
+make clean      # 清理二进制
+make uninstall  # 完全卸载
 ```
 
 ## 配置
