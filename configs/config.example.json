@@ -1,0 +1,7 @@
+{
+  "appId": "your-app-id",
+  "accessToken": "your-access-token",
+  "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
+  "resourceId": "seed-tts-2.0",
+  "voiceType": "zh_female_tianmeitaozi_uranus_bigtts"
+}

@@ -117,3 +117,25 @@ play() 后 → echo "unmute" | nc -U /tmp/iagent.vad.sock
 | `/tmp/iagent.tts.sock` | 播报 Socket |
 | `/tmp/iagent.vad.sock` | VAD 控制 Socket |
 | `/tmp/iSpeak.log` | launchd 日志 |
+
+## 项目文件
+
+```
+iSpeak/
+├── main.go              Go 源码
+├── speak                CLI 客户端
+├── go.mod
+├── README.md
+├── ARCHITECTURE.md
+├── .gitignore
+├── configs/
+│   ├── config.example.json    TTS 配置模板
+│   ├── hook-speak.sh          Claude Hook 脚本
+│   └── com.iSpeak.plist       launchd 自启配置
+│
+部署目标:
+  /usr/local/bin/iSpeak
+  /usr/local/bin/speak
+  ~/.config/iSpeak/{config.json, hook-speak.sh}
+  ~/Library/LaunchAgents/com.iSpeak.plist
+```
