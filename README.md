@@ -2,21 +2,21 @@
 
 TTS 播报守护进程。监听 Unix Socket，收到文本 → 字节跳动 TTS → 播放。
 
-**260 行 Go · 0 外部依赖 · 8.2MB 二进制 · 开机自启。**
+**260 行 Go · 0 外部依赖 · 8.2MB 二进制 · 开机自启 · 桃子音色。**
 
 ## 架构
 
 ```
-Hook / 终端                    iSpeak                      iAgent
-┌──────────┐     nc -U        ┌─────────────────────┐   /tmp/iagent
-│  speak   │ ──────────────→  │  Unix Socket 监听    │  .vad.sock
-│  Hook    │                  │  ↓                   │ ──→ VAD 挂起
-└──────────┘                  │  vadMute() 通知 iAgent│
-                              │  ↓                   │
-                              │  拆句 → TTS → afplay  │
-                              │  ↓                   │
-                              │  vadUnmute() 恢复 VAD │ ──→ VAD 恢复
-                              └─────────────────────┘
+Claude Code                     iSpeak                      iAgent
+┌──────────┐   Stop Hook       ┌─────────────────────┐   /tmp/iagent
+│  回复    │ ───────────────→  │  Unix Socket 监听    │  .vad.sock
+└──────────┘                   │  ↓                   │ ──→ VAD 挂起
+                               │  vadMute() 通知 iAgent│
+  speak "文本"  ─────────────→ │  ↓                   │
+                               │  拆句 → TTS → afplay  │
+                               │  ↓                   │
+                               │  vadUnmute() 恢复 VAD │ ──→ VAD 恢复
+                               └─────────────────────┘
 ```
 
 ## 安装
@@ -34,7 +34,7 @@ sudo ln -sf /Users/admin/iCode/iSpeak/speak /usr/local/bin/speak
 
 ```json
 {
-  "appId": "...",
+  "appId": "3059945724",
   "accessToken": "...",
   "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
   "resourceId": "seed-tts-2.0",
@@ -42,7 +42,7 @@ sudo ln -sf /Users/admin/iCode/iSpeak/speak /usr/local/bin/speak
 }
 ```
 
-也支持环境变量: `IAGENT_TTS_APP_ID`、`IAGENT_TTS_ACCESS_TOKEN`、`IAGENT_TTS_ENDPOINT`、`IAGENT_TTS_RESOURCE_ID`、`IAGENT_TTS_VOICE_TYPE`。
+也支持环境变量：`IAGENT_TTS_APP_ID`、`IAGENT_TTS_ACCESS_TOKEN` 等。
 
 ## 使用
 
@@ -54,10 +54,66 @@ echo "任务完成" | speak
 ## 自启动
 
 ```bash
-# 加载
-launchctl load ~/Library/LaunchAgents/com.iSpeak.plist
-# 卸载
-launchctl unload ~/Library/LaunchAgents/com.iSpeak.plist
-# 查看日志
-tail -f /tmp/iSpeak.log
+launchctl load ~/Library/LaunchAgents/com.iSpeak.plist   # 启用
+launchctl unload ~/Library/LaunchAgents/com.iSpeak.plist # 停用
+tail -f /tmp/iSpeak.log                                  # 日志
 ```
+
+plist 已预置，`RunAtLoad` + `KeepAlive`，重启自动恢复。
+
+## Claude Code 集成
+
+### 1. Stop Hook
+
+`~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bash /Users/admin/.config/iSpeak/hook-speak.sh",
+        "timeout": 30
+      }]
+    }]
+  }
+}
+```
+
+### 2. Hook 脚本
+
+`~/.config/iSpeak/hook-speak.sh` — Claude 每次回复完自动触发：
+
+- 从 `transcript_path` JSONL 提取最近 30 秒内所有 assistant 文本
+- 逐句送到 iSpeak Socket 播放
+- iAgent 内部调 Claude 时设 `ISPEAK_SKIP=1`，Hook 检测到自动跳过（避免双重播报）
+
+### 3. iAgent ISPEAK_SKIP
+
+`AgentService.swift` 在调 Claude 时注入 `ISPEAK_SKIP=1` 环境变量，防止 iAgent 语音交互 + 终端回复各播一遍。
+
+## 与 iAgent VAD 互斥
+
+iSpeak 播音期间，通过 `/tmp/iagent.vad.sock` 通知 iAgent 暂挂语音检测：
+
+```
+play() 前 → echo "mute" | nc -U /tmp/iagent.vad.sock
+play() 后 → echo "unmute" | nc -U /tmp/iagent.vad.sock
+```
+
+防止扬声器输出被麦克风循环拾取。
+
+## 路径速查
+
+| 路径 | 说明 |
+|------|------|
+| `/usr/local/bin/iSpeak` | 守护进程 |
+| `/usr/local/bin/speak` | CLI 客户端 → `/Users/admin/iCode/iSpeak/speak` |
+| `~/.config/iSpeak/config.json` | TTS 配置 |
+| `~/.config/iSpeak/hook-speak.sh` | Claude Hook 脚本 |
+| `~/.config/iSpeak/hook.log` | 播报日志 |
+| `~/Library/LaunchAgents/com.iSpeak.plist` | 自启配置 |
+| `/tmp/iagent.tts.sock` | 播报 Socket |
+| `/tmp/iagent.vad.sock` | VAD 控制 Socket |
+| `/tmp/iSpeak.log` | launchd 日志 |
