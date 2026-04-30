@@ -19,13 +19,29 @@ Claude Code                     iSpeak                      iAgent
                                └─────────────────────┘
 ```
 
-## 安装
+## 全新部署
 
 ```bash
+# 1. 编译
 cd /Users/admin/iCode/iSpeak
 go build -o iSpeak .
+
+# 2. 安装二进制
 sudo cp iSpeak /usr/local/bin/iSpeak
 sudo ln -sf /Users/admin/iCode/iSpeak/speak /usr/local/bin/speak
+
+# 3. 部署配置
+mkdir -p ~/.config/iSpeak
+cp configs/config.example.json ~/.config/iSpeak/config.json
+# 编辑 ~/.config/iSpeak/config.json 填入真实 TTS 凭证
+cp configs/hook-speak.sh ~/.config/iSpeak/hook-speak.sh
+
+# 4. 部署自启动
+cp configs/com.iSpeak.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.iSpeak.plist
+
+# 5. 配置 Claude Code Hook
+# 在 ~/.claude/settings.json 中追加 Stop hook（见下方"Claude Code 集成"）
 ```
 
 ## 配置
@@ -65,7 +81,19 @@ plist 已预置，`RunAtLoad` + `KeepAlive`，重启自动恢复。
 
 ### 1. Stop Hook
 
-`~/.claude/settings.json`:
+在 `~/.claude/settings.json` 的 `hooks` 对象中**合并**以下内容（不要覆盖已有配置）：
+
+```json
+"Stop": [{
+  "hooks": [{
+    "type": "command",
+    "command": "bash /Users/admin/.config/iSpeak/hook-speak.sh",
+    "timeout": 30
+  }]
+}]
+```
+
+完整示例（如果你已有其他 hooks）：
 
 ```json
 {
