@@ -264,25 +264,34 @@ func play(data []byte) error {
 	return cmd.Wait()
 }
 
-// 按中文标点拆句
-func splitSentences(text string) []string {
-	var result []string
-	var current strings.Builder
-	for _, ch := range text {
-		current.WriteRune(ch)
-		if ch == '。' || ch == '！' || ch == '？' || ch == '\n' {
-			s := strings.TrimSpace(current.String())
-			if s != "" {
-				result = append(result, s)
-			}
-			current.Reset()
+// 过滤格式符号，保留自然朗读文本
+func cleanText(text string) string {
+	// 去掉 markdown 表格 (| ... | ... |)
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		// 跳过纯表格分隔行 (|---|---|)
+		if strings.HasPrefix(line, "|---") || strings.HasPrefix(line, "|:---") {
+			continue
+		}
+		// 跳过分隔线
+		if strings.HasPrefix(line, "---") && strings.Count(line, "-") > 3 {
+			continue
+		}
+		// 去掉行内 markdown 符号
+		cleaned := strings.NewReplacer(
+			"**", "",
+			"*", "",
+			"`", "",
+			"#", "",
+			">", "",
+		).Replace(line)
+		cleaned = strings.TrimSpace(cleaned)
+		if cleaned != "" {
+			lines = append(lines, cleaned)
 		}
 	}
-	s := strings.TrimSpace(current.String())
-	if s != "" {
-		result = append(result, s)
-	}
-	return result
+	return strings.Join(lines, "，")
 }
 
 func main() {
@@ -340,18 +349,14 @@ func handleConnection(conn net.Conn, cfg Config) {
 		return
 	}
 
-	sentences := splitSentences(text)
+	cleaned := cleanText(text)
 	vadMute()
-	for _, s := range sentences {
-		log.Printf("TTS: %s", s)
-		audio, err := synthesize(cfg, s)
-		if err != nil {
-			log.Printf("TTS 失败: %v", err)
-			continue
-		}
-		if err := play(audio); err != nil {
-			log.Printf("播放失败: %v", err)
-		}
+	log.Printf("TTS: %s", cleaned)
+	audio, err := synthesize(cfg, cleaned)
+	if err != nil {
+		log.Printf("TTS 失败: %v", err)
+	} else if err := play(audio); err != nil {
+		log.Printf("播放失败: %v", err)
 	}
 	vadUnmute()
 }
