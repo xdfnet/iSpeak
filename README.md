@@ -7,15 +7,15 @@ TTS 播报守护进程。监听 Unix Socket，收到文本 → 字节跳动 TTS 
 ## 架构
 
 ```
-Hook / 终端                    iSpeak
-┌──────────┐     nc -U        ┌─────────────────────┐
-│  speak   │ ──────────────→  │  Unix Socket 监听    │
-│  Hook    │                  │  ↓                   │
-└──────────┘                  │  拆句                │
+Hook / 终端                    iSpeak                      iAgent
+┌──────────┐     nc -U        ┌─────────────────────┐   /tmp/iagent
+│  speak   │ ──────────────→  │  Unix Socket 监听    │  .vad.sock
+│  Hook    │                  │  ↓                   │ ──→ VAD 挂起
+└──────────┘                  │  vadMute() 通知 iAgent│
                               │  ↓                   │
-                              │  字节 TTS SSE API     │
+                              │  拆句 → TTS → afplay  │
                               │  ↓                   │
-                              │  afplay 播放          │
+                              │  vadUnmute() 恢复 VAD │ ──→ VAD 恢复
                               └─────────────────────┘
 ```
 

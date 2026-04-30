@@ -231,6 +231,23 @@ func extractAudioBase64(event map[string]any) string {
 	return ""
 }
 
+// 通知 iAgent 暂停/恢复 VAD
+const vadSock = "/tmp/iagent.vad.sock"
+
+func vadMute() {
+	if conn, err := net.Dial("unix", vadSock); err == nil {
+		conn.Write([]byte("mute"))
+		conn.Close()
+	}
+}
+
+func vadUnmute() {
+	if conn, err := net.Dial("unix", vadSock); err == nil {
+		conn.Write([]byte("unmute"))
+		conn.Close()
+	}
+}
+
 // 用 afplay 播放 MP3
 func play(data []byte) error {
 	tmpDir := os.TempDir()
@@ -324,6 +341,7 @@ func handleConnection(conn net.Conn, cfg Config) {
 	}
 
 	sentences := splitSentences(text)
+	vadMute()
 	for _, s := range sentences {
 		log.Printf("TTS: %s", s)
 		audio, err := synthesize(cfg, s)
@@ -335,4 +353,5 @@ func handleConnection(conn net.Conn, cfg Config) {
 			log.Printf("播放失败: %v", err)
 		}
 	}
+	vadUnmute()
 }

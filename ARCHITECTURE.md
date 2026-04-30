@@ -41,11 +41,16 @@ Claude Code 终端
     │                                   │
     │  handleConnection()               │
     │  ├─ read all text                 │
+    │  ├─ vadMute() → iAgent VAD 暂停   │
     │  ├─ splitSentences()              │
     │  └─ for each sentence:            │
     │       ├─ synthesize()  调用 TTS    │
     │       └─ play()        afplay     │
+    │  └─ vadUnmute() → iAgent VAD 恢复 │
     └───────────────────────────────────┘
+           │ mute / unmute
+           ▼
+    /tmp/iagent.vad.sock → iAgent VoiceService
                     │
     ┌───────────────▼───────────────────┐
     │     字节跳动 TTS API              │
