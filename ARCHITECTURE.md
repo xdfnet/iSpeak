@@ -42,10 +42,9 @@ Claude Code 终端
     │  handleConnection()               │
     │  ├─ read all text                 │
     │  ├─ vadMute() → iAgent VAD 暂停   │
-    │  ├─ splitSentences()              │
-    │  └─ for each sentence:            │
-    │       ├─ synthesize()  调用 TTS    │
-    │       └─ play()        afplay     │
+    │  ├─ cleanText() 过滤格式          │
+    │  ├─ synthesize()  调用 TTS         │
+    │  └─ play()        afplay          │
     │  └─ vadUnmute() → iAgent VAD 恢复 │
     └───────────────────────────────────┘
            │ mute / unmute
@@ -64,17 +63,20 @@ Claude Code 终端
 
 ## 关键设计决策
 
-### 1. 全文一次发送，服务端拆句
+### 1. 全文一次播放，不拆句
 
-`speak` 脚本把整段文字一次性 `nc` 发送。拆句在 `handleConnection` 里做。
+全文一次 TTS → 一次 afplay。`cleanText()` 过滤掉 markdown 表格、分隔线、粗体/代码标记等格式符，保留自然朗读文本。
 
-**原因**: 如果客户端拆句、逐句 `nc`，每次新连接会触发独立的 `handleConnection` → 进程级并发 → 后一句的 `play()` 打断前一句。
+**原因**: 实测发现拆句反而破坏语义连贯性，整段播放效果更好。
 
-### 2. 串行播放
+### 2. cleanText 过滤规则
 
-每句合成→播放→等播完，再处理下一句。
+- 跳过 markdown 表格行 (`| ... |`)
+- 跳过表格分隔行 (`|---|---|`)
+- 移除 `**` `*` `` ` `` `#` `>` 等行内标记
+- 换行替换为逗号
 
-**不做**: 预合成全部句子再连续播放。原因：第一句就能让用户听到，延迟更低。
+不做自然语言理解，仅做字符级过滤。
 
 ### 3. afplay 而非 AVAudioPlayer
 
@@ -106,8 +108,9 @@ Go 没有 Foundation 绑定，用 `exec.Command("afplay", tmpFile)`。
 
 | 文件 | 用途 |
 |------|------|
-| `main.go` | 全部逻辑 (260行) |
+| `main.go` | 全部逻辑 (~280行) |
 | `speak` | Shell 客户端 |
+| `configs/` | 部署模板 (config/hook/plist) |
 | `README.md` | 使用说明 |
 | `ARCHITECTURE.md` | 本文档 |
 | `go.mod` | Go module |
