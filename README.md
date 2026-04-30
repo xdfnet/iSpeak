@@ -72,7 +72,19 @@ launchctl unload ~/Library/LaunchAgents/com.iSpeak.plist # 停用
 tail -f /tmp/iSpeak.log                                  # 日志
 ```
 
-plist 已预置，`RunAtLoad` + `KeepAlive`，重启自动恢复。
+plist 内容：
+
+```xml
+<!-- configs/com.iSpeak.plist -->
+<dict>
+    <key>Label</key>            <string>com.iSpeak</string>
+    <key>ProgramArguments</key> <array><string>/usr/local/bin/iSpeak</string></array>
+    <key>RunAtLoad</key>        <true/>   <!-- 开机自启 -->
+    <key>KeepAlive</key>        <true/>   <!-- 崩溃自动重启 -->
+</dict>
+```
+
+部署路径：`~/Library/LaunchAgents/com.iSpeak.plist`。`make deploy` 自动复制 + 加载。
 
 ## Claude Code 集成
 
