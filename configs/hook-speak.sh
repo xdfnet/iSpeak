@@ -3,7 +3,7 @@
 # iAgent 调用 Claude 时设 ISPEAK_SKIP=1，此时跳过（iAgent 自己播）
 [[ "$ISPEAK_SKIP" == "1" ]] && exit 0
 
-SOCK=/tmp/iagent.tts.sock
+SOCK=/tmp/ispeak.sock
 LOG="$HOME/.config/iSpeak/hook.log"
 
 input=$(cat)

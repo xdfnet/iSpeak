@@ -1,6 +1,6 @@
 #!/bin/bash
 # speak — 发送文本到 iSpeak TTS 服务
-SOCK=/tmp/iagent.tts.sock
+SOCK=/tmp/ispeak.sock
 [[ -z "$1" && -t 0 ]] && { echo "usage: echo 'text' | speak   or   speak 'text'" >&2; exit 1; }
 text="${*:-$(cat)}"
 [[ -z "$text" ]] && exit 0

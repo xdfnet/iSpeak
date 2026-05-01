@@ -301,7 +301,7 @@ func main() {
 		log.Fatal("缺少 TTS 凭证: 请设置 IAGENT_TTS_APP_ID 和 IAGENT_TTS_ACCESS_TOKEN 环境变量")
 	}
 
-	socketPath := "/tmp/iagent.tts.sock"
+	socketPath := "/tmp/ispeak.sock"
 	os.Remove(socketPath)
 
 	listener, err := net.Listen("unix", socketPath)
@@ -320,7 +320,7 @@ func main() {
 		os.Exit(0)
 	}()
 
-	log.Printf("ttsd 已启动，监听 %s", socketPath)
+	log.Printf("iSpeak 已启动，监听 %s", socketPath)
 
 	for {
 		conn, err := listener.Accept()

@@ -151,7 +151,7 @@ play() 后 → echo "unmute" | nc -U /tmp/iagent.vad.sock
 | `~/.config/iSpeak/hook-speak.sh` | Claude Hook 脚本 |
 | `~/.config/iSpeak/hook.log` | 播报日志 |
 | `~/Library/LaunchAgents/com.iSpeak.plist` | 自启配置 |
-| `/tmp/iagent.tts.sock` | 播报 Socket |
+| `/tmp/ispeak.sock` | 播报 Socket |
 | `/tmp/iagent.vad.sock` | VAD 控制 Socket |
 | `/tmp/iSpeak.log` | launchd 日志 |
 

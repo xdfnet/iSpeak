@@ -25,12 +25,12 @@ Claude Code 终端
 │       │
 │       ├─ 读 transcript_path JSONL
 │       ├─ 提取 30s 内所有 assistant text
-│       └─ nc -U /tmp/iagent.tts.sock
+│       └─ nc -U /tmp/ispeak.sock
 │
 └─ 手动触发
-    └─ speak "文本" → nc -U /tmp/iagent.tts.sock
+    └─ speak "文本" → nc -U /tmp/ispeak.sock
 
-        Unix Socket (/tmp/iagent.tts.sock)
+        Unix Socket (/tmp/ispeak.sock)
                     │
     ┌───────────────▼───────────────────┐
     │           iSpeak (Go)             │
