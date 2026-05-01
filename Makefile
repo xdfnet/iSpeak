@@ -9,7 +9,8 @@ build:
 	go build -o $(BIN) .
 
 install: build
-	sudo cp $(BIN) $(DST)
+	@# /usr/local/bin/iSpeak 可能已是指向仓库二进制的软链接；同文件时不应视为失败
+	sudo cp -f $(BIN) $(DST) || true
 	sudo ln -sf $(PWD)/speak /usr/local/bin/speak
 
 uninstall:
