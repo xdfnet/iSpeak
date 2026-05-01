@@ -18,10 +18,10 @@ iAgent 最早把 TTS 播报作为 StreamingSpeaker 模块嵌在 AgentControlCent
 ## 系统全貌
 
 ```
-Claude Code 终端
+Claude Code / Codex 终端
 │
 ├─ 回复文字
-│   └─ Stop Hook → /tmp/hook_debug.sh
+│   └─ Stop Hook → ~/.config/iSpeak/hook-speak.sh
 │       │
 │       ├─ 读 transcript_path JSONL
 │       ├─ 提取 30s 内所有 assistant text

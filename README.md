@@ -7,13 +7,14 @@ TTS 播报守护进程。监听 Unix Socket，收到文本 → 字节跳动 TTS 
 ## 架构
 
 ```
-Claude Code                     iSpeak                      iAgent
+Claude Code / Codex              iSpeak                      iAgent
 ┌──────────┐   Stop Hook       ┌─────────────────────┐   /tmp/iagent
 │  回复    │ ───────────────→  │  Unix Socket 监听    │  .vad.sock
 └──────────┘                   │  ↓                   │ ──→ VAD 挂起
                                │  vadMute() 通知 iAgent│
   speak "文本"  ─────────────→ │  ↓                   │
-                               │  拆句 → TTS → afplay  │
+                               │  cleanText → TTS →    │
+                               │  afplay 播放          │
                                │  ↓                   │
                                │  vadUnmute() 恢复 VAD │ ──→ VAD 恢复
                                └─────────────────────┘
@@ -129,6 +130,41 @@ plist 内容：
 ### 3. iAgent ISPEAK_SKIP
 
 `AgentService.swift` 在调 Claude 时注入 `ISPEAK_SKIP=1` 环境变量，防止 iAgent 语音交互 + 终端回复各播一遍。
+
+## Codex CLI 集成
+
+### 1. 启用 Hooks
+
+```bash
+codex features enable codex_hooks
+```
+
+或 `~/.codex/config.toml`:
+
+```toml
+[features]
+codex_hooks = true
+```
+
+### 2. Stop Hook
+
+`~/.codex/hooks.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bash /Users/admin/.config/iSpeak/hook-speak.sh",
+        "timeout": 30
+      }]
+    }]
+  }
+}
+```
+
+Claude Code 和 Codex 共用同一个 Hook 脚本，无需额外配置。
 
 ## 与 iAgent VAD 互斥
 
