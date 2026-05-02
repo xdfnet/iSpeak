@@ -85,6 +85,10 @@ type ttsAudioParams struct {
 	SampleRate int    `json:"sample_rate"`
 }
 
+type playJob struct {
+	text string
+}
+
 // 调用字节跳动 TTS API，返回 MP3 音频数据
 func synthesize(cfg Config, text string) ([]byte, error) {
 	reqBody := ttsRequest{
@@ -241,10 +245,16 @@ func play(data []byte) error {
 	defer os.Remove(tmpFile)
 
 	cmd := exec.Command("/usr/bin/afplay", tmpFile)
+	startedAt := time.Now()
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("afplay start: %w", err)
 	}
-	return cmd.Wait()
+	log.Printf("播放开始: %s", filepath.Base(tmpFile))
+	if err := cmd.Wait(); err != nil {
+		return err
+	}
+	log.Printf("播放完成: %s, 耗时=%s", filepath.Base(tmpFile), time.Since(startedAt).Round(time.Millisecond))
+	return nil
 }
 
 // 过滤格式符号，保留自然朗读文本
@@ -304,6 +314,8 @@ func main() {
 	}()
 
 	log.Printf("iSpeak 已启动，监听 %s", socketPath)
+	playQueue := make(chan playJob, 128)
+	go playbackWorker(cfg, playQueue)
 
 	for {
 		conn, err := listener.Accept()
@@ -313,11 +325,25 @@ func main() {
 			}
 			continue
 		}
-		go handleConnection(conn, cfg)
+		go handleConnection(conn, playQueue)
 	}
 }
 
-func handleConnection(conn net.Conn, cfg Config) {
+func playbackWorker(cfg Config, queue <-chan playJob) {
+	for job := range queue {
+		log.Printf("TTS: %s", job.text)
+		audio, err := synthesize(cfg, job.text)
+		if err != nil {
+			log.Printf("TTS 失败: %v", err)
+			continue
+		}
+		if err := play(audio); err != nil {
+			log.Printf("播放失败: %v", err)
+		}
+	}
+}
+
+func handleConnection(conn net.Conn, queue chan<- playJob) {
 	defer conn.Close()
 
 	var sb strings.Builder
@@ -333,11 +359,14 @@ func handleConnection(conn net.Conn, cfg Config) {
 	}
 
 	cleaned := cleanText(text)
-	log.Printf("TTS: %s", cleaned)
-	audio, err := synthesize(cfg, cleaned)
-	if err != nil {
-		log.Printf("TTS 失败: %v", err)
-	} else if err := play(audio); err != nil {
-		log.Printf("播放失败: %v", err)
+	if cleaned == "" {
+		return
+	}
+
+	select {
+	case queue <- playJob{text: cleaned}:
+		log.Printf("已入队播报，队列长度=%d", len(queue))
+	default:
+		log.Printf("播放队列已满，丢弃一条消息")
 	}
 }

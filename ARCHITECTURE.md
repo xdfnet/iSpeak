@@ -42,6 +42,9 @@ Claude Code / Codex 终端
     │  handleConnection()               │
     │  ├─ read all text                 │
     │  ├─ cleanText() 过滤格式          │
+    │  └─ enqueue()     入播放队列       │
+    │                                   │
+    │  playbackWorker()                 │
     │  ├─ synthesize()  调用 TTS         │
     │  └─ play()        afplay          │
     └───────────────────────────────────┘
@@ -80,7 +83,15 @@ Go 没有 Foundation 绑定，用 `exec.Command("afplay", tmpFile)`。
 **代价**: 无法精确控制音量（当前用系统音量）。  
 **收益**: 零依赖，标准库搞定。
 
-### 4. 配置三层优先级
+### 4. 串行播放队列
+
+所有连接先入队，由单 worker 串行执行 `TTS -> 播放`，避免并发连接时多段音频互相覆盖。
+
+### 5. 不做媒体控制
+
+当前版本不做 Music/Spotify/汽水音乐 的暂停与恢复控制，职责保持为纯播报。
+
+### 6. 配置三层优先级
 
 ```
 ~/.config/iSpeak/config.json  >  环境变量  >  代码默认值
@@ -90,7 +101,7 @@ Go 没有 Foundation 绑定，用 `exec.Command("afplay", tmpFile)`。
 - 环境变量: 开发调试用
 - 默认值: endpoint/resourceId/voiceType 有合理 fallback
 
-### 5. launchd 守护
+### 7. launchd 守护
 
 ```xml
 <key>RunAtLoad</key><true/>
