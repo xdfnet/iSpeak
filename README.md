@@ -35,9 +35,9 @@ ispeak tail               # 实时日志
 make build    # 构建 build/ispeakd
 make install  # 停止 -> 卸载旧版本 -> 安装 -> 启动
 make deploy   # install + 配置文件部署（config/hook/plist）
-make restart  # 重启 LaunchAgent
-make status   # 状态检查
 ```
+
+说明：`make` 只负责“构建与安装”，运行态操作统一走 `ispeak`。
 
 ## 配置
 

@@ -1,4 +1,4 @@
-.PHONY: build install deploy restart status
+.PHONY: build install deploy
 
 BIN    := build/ispeakd
 DST    := /usr/local/bin/ispeakd
@@ -42,27 +42,3 @@ deploy: install
 		launchctl load $(PLIST); \
 	fi
 	@echo "部署完成 — 编辑 $(CONFIG)/config.json 填入 TTS 凭证"
-
-restart:
-	@if [ -n "$$SUDO_USER" ]; then \
-		sudo -u "$$SUDO_USER" launchctl unload $(PLIST) 2>/dev/null || true; \
-	else \
-		launchctl unload $(PLIST) 2>/dev/null || true; \
-	fi
-	rm -f /tmp/ispeak.sock
-	@if [ -n "$$SUDO_USER" ]; then \
-		sudo -u "$$SUDO_USER" launchctl load $(PLIST); \
-	else \
-		launchctl load $(PLIST); \
-	fi
-	@echo "iSpeak restarted"
-
-status:
-	@echo "== launchd =="
-	@launchctl list | grep -i iSpeak || echo "com.iSpeak not loaded"
-	@echo "== launchd detail =="
-	@launchctl print gui/$$(id -u)/com.iSpeak 2>/dev/null | sed -n '1,40p' || true
-	@echo "== socket =="
-	@ls -l /tmp/ispeak.sock 2>/dev/null || echo "socket missing"
-	@echo "== binaries =="
-	@ls -l /usr/local/bin/ispeakd /usr/local/bin/ispeak 2>/dev/null || true
