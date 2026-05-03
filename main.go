@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -27,13 +28,24 @@ const (
 	ttsRetryBackoff = 400 * time.Millisecond
 )
 
+// 音色条目
+type VoiceEntry struct {
+	VoiceType string `json:"voice_type"`
+	ResourceID string `json:"resourceId"`
+}
+
+// 音色轮换状态
+var (
+	voiceIndex int
+	voiceList  []VoiceEntry
+	voiceMu    sync.Mutex
+)
+
 // TTS 配置 — 从环境变量读取，兼容 iAgent 的命名
 type Config struct {
-	AppID       string `json:"appId"`
-	AccessToken string `json:"accessToken"`
-	Endpoint    string `json:"endpoint"`
-	ResourceID  string `json:"resourceId"`
-	VoiceType   string `json:"voiceType"`
+	APIKey    string       `json:"apiKey"`
+	Endpoint  string       `json:"endpoint"`
+	VoiceList []VoiceEntry `json:"voiceList"` // 音色列表，用于轮换
 }
 
 func loadConfig() Config {
@@ -46,19 +58,24 @@ func loadConfig() Config {
 			continue
 		}
 		var cfg Config
-		if json.Unmarshal(data, &cfg) == nil && cfg.AccessToken != "" {
+		if json.Unmarshal(data, &cfg) == nil && cfg.APIKey != "" {
 			log.Printf("配置文件: %s", p)
+			// 初始化音色列表
+			voiceMu.Lock()
+			voiceList = cfg.VoiceList
+			voiceIndex = 0
+			if len(voiceList) > 0 {
+				log.Printf("音色轮换已启用，共 %d 个音色", len(voiceList))
+			}
+			voiceMu.Unlock()
 			return cfg
 		}
 	}
 
 	// 回退到环境变量
 	return Config{
-		AppID:       envOrDefault("IAGENT_TTS_APP_ID", ""),
-		AccessToken: envOrDefault("IAGENT_TTS_ACCESS_TOKEN", ""),
-		Endpoint:    envOrDefault("IAGENT_TTS_ENDPOINT", "https://openspeech.bytedance.com/api/v3/tts/unidirectional"),
-		ResourceID:  envOrDefault("IAGENT_TTS_RESOURCE_ID", "seed-tts-2.0"),
-		VoiceType:   envOrDefault("IAGENT_TTS_VOICE_TYPE", "zh_female_tianmeitaozi_uranus_bigtts"),
+		APIKey:   envOrDefault("IAGENT_TTS_API_KEY", ""),
+		Endpoint: envOrDefault("IAGENT_TTS_ENDPOINT", "https://openspeech.bytedance.com/api/v3/tts/unidirectional"),
 	}
 }
 
@@ -97,12 +114,24 @@ type playJob struct {
 
 // 调用字节跳动 TTS API，返回 MP3 音频数据
 func synthesize(cfg Config, text string) ([]byte, error) {
+	// 获取当前音色（轮换逻辑）
+	voiceMu.Lock()
+	speaker := "zh_female_tianmeitaozi_uranus_bigtts"
+	resourceID := "seed-tts-2.0"
+	if len(voiceList) > 0 {
+		speaker = voiceList[voiceIndex].VoiceType
+		resourceID = voiceList[voiceIndex].ResourceID
+		voiceIndex = (voiceIndex + 1) % len(voiceList)
+		log.Printf("音色轮换: %s (resourceId: %s, 索引 %d/%d)", speaker, resourceID, voiceIndex, len(voiceList))
+	}
+	voiceMu.Unlock()
+
 	reqBody := ttsRequest{
 		User:      ttsUser{UID: "ttsd-" + time.Now().Format("150405")},
 		Namespace: "BidirectionalTTS",
 		ReqParams: ttsReqParams{
 			Text:    text,
-			Speaker: cfg.VoiceType,
+			Speaker: speaker,
 			AudioParams: ttsAudioParams{
 				Format:     "mp3",
 				SampleRate: 24000,
@@ -120,9 +149,8 @@ func synthesize(cfg Config, text string) ([]byte, error) {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Api-App-Id", cfg.AppID)
-	req.Header.Set("X-Api-Access-Key", cfg.AccessToken)
-	req.Header.Set("X-Api-Resource-Id", cfg.ResourceID)
+	req.Header.Set("X-Api-Key", cfg.APIKey)
+	req.Header.Set("X-Api-Resource-Id", resourceID)
 	req.Header.Set("X-Api-Request-Id", fmt.Sprintf("ttsd-%d", time.Now().UnixNano()))
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -290,8 +318,8 @@ func cleanText(text string) string {
 func main() {
 	log.SetFlags(log.Ltime | log.Lshortfile)
 	cfg := loadConfig()
-	if cfg.AppID == "" || cfg.AccessToken == "" {
-		log.Fatal("缺少 TTS 凭证: 请设置 IAGENT_TTS_APP_ID 和 IAGENT_TTS_ACCESS_TOKEN 环境变量")
+	if cfg.APIKey == "" {
+		log.Fatal("缺少 TTS 凭证: 请设置 IAGENT_TTS_API_KEY 环境变量")
 	}
 
 	socketPath := "/tmp/ispeak.sock"
