@@ -1,0 +1,112 @@
+#!/bin/bash
+# ispeak — iSpeak 控制命令
+set -euo pipefail
+
+SOCK=/tmp/ispeak.sock
+PLIST="$HOME/Library/LaunchAgents/com.iSpeak.plist"
+LOG=/tmp/iSpeak.log
+
+usage() {
+  cat <<'EOF'
+usage:
+  ispeak "文本"            直接播报
+  ispeak say "文本"        播报文本
+  ispeak status            查看服务/Socket状态
+  ispeak test [文本]       发送测试播报
+  ispeak restart           重启服务
+  ispeak recover           重启并自检
+  ispeak logs [N]          查看最近 N 行日志（默认 50）
+  ispeak tail              实时日志
+EOF
+}
+
+send_text() {
+  local text="$1"
+  [[ -z "$text" ]] && return 0
+  printf "%s" "$text" | nc -U -w5 "$SOCK" 2>/dev/null || {
+    echo "ispeak: 发送失败（socket 不可用）" >&2
+    return 1
+  }
+}
+
+cmd_status() {
+  echo "== launchd =="
+  launchctl list | grep -i iSpeak || echo "com.iSpeak not loaded"
+  echo "== launchd detail =="
+  launchctl print "gui/$(id -u)/com.iSpeak" 2>/dev/null | sed -n '1,40p' || true
+  echo "== socket =="
+  ls -l "$SOCK" 2>/dev/null || echo "socket missing"
+  echo "== binaries =="
+  ls -l /usr/local/bin/ispeakd /usr/local/bin/ispeak 2>/dev/null || true
+}
+
+cmd_restart() {
+  launchctl unload "$PLIST" 2>/dev/null || true
+  rm -f "$SOCK"
+  launchctl load "$PLIST"
+  echo "ispeak: restarted"
+}
+
+cmd_test() {
+  local text="${1:-飞哥，ispeak 测试通过}"
+  send_text "$text"
+}
+
+cmd_logs() {
+  local n="${1:-50}"
+  tail -n "$n" "$LOG"
+}
+
+cmd_tail() {
+  tail -f "$LOG"
+}
+
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 1
+fi
+
+case "$1" in
+  status)
+    cmd_status
+    ;;
+  say)
+    shift
+    if [[ $# -eq 0 ]]; then
+      if [[ -t 0 ]]; then
+        usage
+        exit 1
+      fi
+      send_text "$(cat)"
+    else
+      send_text "$*"
+    fi
+    ;;
+  test)
+    shift
+    cmd_test "${*:-}"
+    ;;
+  restart)
+    cmd_restart
+    ;;
+  recover)
+    cmd_restart
+    sleep 1
+    cmd_status
+    cmd_test
+    ;;
+  logs)
+    shift
+    cmd_logs "${1:-50}"
+    ;;
+  tail)
+    cmd_tail
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    # 兼容：ispeak "文本"
+    send_text "$*"
+    ;;
+esac

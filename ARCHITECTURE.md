@@ -28,7 +28,7 @@ Claude Code / Codex 终端
 │       └─ nc -U /tmp/ispeak.sock
 │
 └─ 手动触发
-    └─ speak "文本" → nc -U /tmp/ispeak.sock
+    └─ ispeak "文本" → nc -U /tmp/ispeak.sock
 
         Unix Socket (/tmp/ispeak.sock)
                     │
@@ -83,9 +83,19 @@ Go 没有 Foundation 绑定，用 `exec.Command("afplay", tmpFile)`。
 **代价**: 无法精确控制音量（当前用系统音量）。  
 **收益**: 零依赖，标准库搞定。
 
-### 4. 串行播放队列
+### 4. TTS 并发 + 播放串行
 
-所有连接先入队，由单 worker 串行执行 `TTS -> 播放`，避免并发连接时多段音频互相覆盖。
+当前采用两阶段：
+
+1. 连接协程先做 TTS（并发，信号量限流）
+2. 合成好的音频再入播放队列（单 worker 串行播放）
+
+这样既保留了“只播一条”的稳定体验，也降低了高并发下的总等待时间。
+
+默认参数：
+- 播放队列长度：`128`
+- TTS 并发上限：`4`
+- TTS 重试：失败后最多再试 `1` 次（总尝试 2 次）
 
 ### 5. 不做媒体控制
 
@@ -110,12 +120,17 @@ Go 没有 Foundation 绑定，用 `exec.Command("afplay", tmpFile)`。
 
 退出自动重启，开机自动加载。
 
+### 8. 进程防护
+
+- `handleConnection` 和 `playbackWorker` 都有 `panic recover`，避免单条异常导致进程退出。
+- `make status` 提供最小健康检查（launchd / socket / 二进制路径）。
+
 ## 文件清单
 
 | 文件 | 用途 |
 |------|------|
 | `main.go` | 全部逻辑 (~280行) |
-| `speak` | Shell 客户端 |
+| `scripts/ispeak` | 运行命令（status/test/restart/...） |
 | `configs/` | 部署模板 (config/hook/plist) |
 | `README.md` | 使用说明 |
 | `ARCHITECTURE.md` | 本文档 |
@@ -143,4 +158,4 @@ Go 标准库:
 | 内存 | < 10MB |
 | 启动 | < 100ms |
 | TTS 延迟 (首句) | ~800ms |
-| 并发 | 串行播放，多连接排队 |
+| 并发 | TTS 并发（默认 4），播放串行 |

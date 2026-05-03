@@ -6,7 +6,7 @@
     <string>com.iSpeak</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/admin/iCode/iSpeak/iSpeak</string>
+        <string>/usr/local/bin/ispeakd</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

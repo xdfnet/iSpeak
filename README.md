@@ -11,12 +11,18 @@ Claude Code / Codex              iSpeak
 ┌──────────┐   Stop Hook       ┌─────────────────────┐
 │  回复    │ ───────────────→  │  Unix Socket 监听    │
 └──────────┘                   │  ↓                   │
-  speak "文本"  ─────────────→ │  cleanText → 入队 →    │
+  ispeak "文本" ─────────────→ │  cleanText → 入队 →    │
                                │  TTS → afplay 播放     │
                                └─────────────────────┘
 ```
 
 说明：当前版本不做媒体暂停/恢复控制，只负责文本播报；多条消息按队列串行播放。
+
+稳定性策略（小而稳）：
+- TTS 在连接协程并发执行，播放严格串行
+- TTS 并发上限 `4`（避免突发请求拖垮服务）
+- 单次 TTS 失败自动重试 `1` 次
+- 关键 worker 带 `panic` 保护，异常不拖垮主进程
 
 ## 全新部署
 
@@ -32,12 +38,8 @@ make deploy                                     # 一键：编译 + 安装 + 配
 make build      # 编译
 make install    # 安装到 /usr/local/bin
 make deploy     # 部署配置 + 自启动
-make start      # 启动
-make stop       # 停止
 make restart    # 重启
-make log        # 查看日志
-make clean      # 清理二进制
-make uninstall  # 完全卸载
+make status     # 快速状态检查
 ```
 
 ## 配置
@@ -59,16 +61,18 @@ make uninstall  # 完全卸载
 ## 使用
 
 ```bash
-speak "飞哥你好"
-echo "任务完成" | speak
+ispeak status
+ispeak test "飞哥你好"
+ispeak "任务完成"
 ```
 
 ## 自启动
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.iSpeak.plist   # 启用
-launchctl unload ~/Library/LaunchAgents/com.iSpeak.plist # 停用
-tail -f /tmp/iSpeak.log                                  # 日志
+ispeak restart      # 重启
+ispeak status       # 状态
+ispeak logs 80      # 最近 80 行日志
+ispeak tail         # 实时日志
 ```
 
 plist 内容：
@@ -77,7 +81,7 @@ plist 内容：
 <!-- configs/com.iSpeak.plist -->
 <dict>
     <key>Label</key>            <string>com.iSpeak</string>
-    <key>ProgramArguments</key> <array><string>/usr/local/bin/iSpeak</string></array>
+    <key>ProgramArguments</key> <array><string>/usr/local/bin/ispeakd</string></array>
     <key>RunAtLoad</key>        <true/>   <!-- 开机自启 -->
     <key>KeepAlive</key>        <true/>   <!-- 崩溃自动重启 -->
 </dict>
@@ -168,8 +172,8 @@ Claude Code 和 Codex 共用同一个 Hook 脚本，无需额外配置。
 
 | 路径 | 说明 |
 |------|------|
-| `/usr/local/bin/iSpeak` | 守护进程 |
-| `/usr/local/bin/speak` | CLI 客户端（由仓库内 `speak` 脚本安装） |
+| `/usr/local/bin/ispeakd` | 守护进程二进制 |
+| `/usr/local/bin/ispeak` | 运维命令（status/test/restart/recover） |
 | `~/.config/iSpeak/config.json` | TTS 配置 |
 | `~/.config/iSpeak/hook-speak.sh` | Claude Hook 脚本 |
 | `~/.config/iSpeak/hook.log` | 播报日志 |
@@ -186,7 +190,7 @@ MIT
 ```
 iSpeak/
 ├── main.go              Go 源码
-├── speak                CLI 客户端
+├── scripts/ispeak       运行命令（status/test/restart/...）
 ├── go.mod
 ├── README.md
 ├── ARCHITECTURE.md
@@ -197,8 +201,8 @@ iSpeak/
 │   └── com.iSpeak.plist       launchd 自启配置
 │
 部署目标:
-  /usr/local/bin/iSpeak
-  /usr/local/bin/speak
+  /usr/local/bin/ispeakd
+  /usr/local/bin/ispeak
   ~/.config/iSpeak/{config.json, hook-speak.sh}
   ~/Library/LaunchAgents/com.iSpeak.plist
 ```
