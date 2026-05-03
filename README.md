@@ -1,50 +1,47 @@
 # iSpeak
 
-TTS 播报守护进程。监听 Unix Socket，收到文本 → 字节跳动 TTS → 串行播放。
+小而稳的本地 TTS 播报服务：接收文本，转换语音并顺序播放。
 
-**Go 单文件核心逻辑 · 0 外部依赖 · 开机自启 · 桃子音色。**
+## 组成
 
-## 架构
+- `/usr/local/bin/ispeakd`：守护进程（监听 `/tmp/ispeak.sock`）
+- `/usr/local/bin/ispeak`：命令入口（status/test/restart/logs/tail/say）
 
-```
-Claude Code / Codex              iSpeak
-┌──────────┐   Stop Hook       ┌─────────────────────┐
-│  回复    │ ───────────────→  │  Unix Socket 监听    │
-└──────────┘                   │  ↓                   │
-  ispeak "文本" ─────────────→ │  cleanText → 入队 →    │
-                               │  TTS → afplay 播放     │
-                               └─────────────────────┘
-```
-
-说明：当前版本不做媒体暂停/恢复控制，只负责文本播报；多条消息按队列串行播放。
-
-稳定性策略（小而稳）：
-- TTS 在连接协程并发执行，播放严格串行
-- TTS 并发上限 `4`（避免突发请求拖垮服务）
-- 单次 TTS 失败自动重试 `1` 次
-- 关键 worker 带 `panic` 保护，异常不拖垮主进程
-
-## 全新部署
+## 快速安装
 
 ```bash
 cd /path/to/iSpeak
-make deploy                                     # 一键：编译 + 安装 + 配置 + 自启
-# 编辑 ~/.config/iSpeak/config.json 填入 TTS 凭证
+sudo make install
+make status
+ispeak test "飞哥你好"
 ```
 
-分步操作：
+## 常用命令
 
 ```bash
-make build      # 编译
-make install    # 安装到 /usr/local/bin
-make deploy     # 部署配置 + 自启动
-make restart    # 重启
-make status     # 快速状态检查
+ispeak "任务完成"          # 日常播报（等价于 ispeak say "任务完成"）
+ispeak test               # 自检播报（默认测试文案）
+ispeak test "飞哥你好"     # 自检播报（自定义文案）
+ispeak status             # 查看服务/socket/二进制
+ispeak restart            # 重启服务
+ispeak recover            # 重启 + 状态检查 + 测试播报
+ispeak logs 80            # 查看最近 80 行日志
+ispeak tail               # 实时日志
+```
+
+## Makefile 命令
+
+```bash
+make build    # 构建 build/ispeakd
+make install  # 停止 -> 卸载旧版本 -> 安装 -> 启动
+make deploy   # install + 配置文件部署（config/hook/plist）
+make restart  # 重启 LaunchAgent
+make status   # 状态检查
 ```
 
 ## 配置
 
-`~/.config/iSpeak/config.json`:
+配置文件路径：`~/.config/iSpeak/config.json`
 
 ```json
 {
@@ -56,153 +53,42 @@ make status     # 快速状态检查
 }
 ```
 
-也支持环境变量：`IAGENT_TTS_APP_ID`、`IAGENT_TTS_ACCESS_TOKEN` 等。
+也支持环境变量：
+- `IAGENT_TTS_APP_ID`
+- `IAGENT_TTS_ACCESS_TOKEN`
+- `IAGENT_TTS_ENDPOINT`
+- `IAGENT_TTS_RESOURCE_ID`
+- `IAGENT_TTS_VOICE_TYPE`
 
-## 使用
+## Claude / Codex Hook
 
-```bash
-ispeak status
-ispeak test "飞哥你好"
-ispeak "任务完成"
-```
-
-## 自启动
-
-```bash
-ispeak restart      # 重启
-ispeak status       # 状态
-ispeak logs 80      # 最近 80 行日志
-ispeak tail         # 实时日志
-```
-
-plist 内容：
-
-```xml
-<!-- configs/com.iSpeak.plist -->
-<dict>
-    <key>Label</key>            <string>com.iSpeak</string>
-    <key>ProgramArguments</key> <array><string>/usr/local/bin/ispeakd</string></array>
-    <key>RunAtLoad</key>        <true/>   <!-- 开机自启 -->
-    <key>KeepAlive</key>        <true/>   <!-- 崩溃自动重启 -->
-</dict>
-```
-
-部署路径：`~/Library/LaunchAgents/com.iSpeak.plist`。`make deploy` 自动复制 + 加载。
-
-## Claude Code 集成
-
-### 1. Stop Hook
-
-在 `~/.claude/settings.json` 的 `hooks` 对象中**合并**以下内容（不要覆盖已有配置）：
-
-```json
-"Stop": [{
-  "hooks": [{
-    "type": "command",
-    "command": "bash $HOME/.config/iSpeak/hook-speak.sh",
-    "timeout": 30
-  }]
-}]
-```
-
-完整示例（如果你已有其他 hooks）：
+Stop Hook 命令：
 
 ```json
 {
-  "hooks": {
-    "Stop": [{
-      "hooks": [{
-        "type": "command",
-        "command": "bash $HOME/.config/iSpeak/hook-speak.sh",
-        "timeout": 30
-      }]
-    }]
-  }
+  "type": "command",
+  "command": "bash $HOME/.config/iSpeak/hook-speak.sh",
+  "timeout": 30
 }
 ```
 
-### 2. Hook 脚本
+部署时会安装到：`~/.config/iSpeak/hook-speak.sh`。
 
-`~/.config/iSpeak/hook-speak.sh` — Claude 每次回复完自动触发：
+## 稳定性策略
 
-- 从 `transcript_path` JSONL 提取最近 30 秒内所有 assistant 文本
-- 逐句送到 iSpeak Socket 播放
-- iAgent 内部调 Claude 时设 `ISPEAK_SKIP=1`，Hook 检测到自动跳过（避免双重播报）
-
-### 3. iAgent ISPEAK_SKIP
-
-`AgentService.swift` 在调 Claude 时注入 `ISPEAK_SKIP=1` 环境变量，防止 iAgent 语音交互 + 终端回复各播一遍。
-
-## Codex CLI 集成
-
-### 1. 启用 Hooks
-
-```bash
-codex features enable codex_hooks
-```
-
-或 `~/.codex/config.toml`:
-
-```toml
-[features]
-codex_hooks = true
-```
-
-### 2. Stop Hook
-
-`~/.codex/hooks.json`:
-
-```json
-{
-  "hooks": {
-    "Stop": [{
-      "hooks": [{
-        "type": "command",
-        "command": "bash $HOME/.config/iSpeak/hook-speak.sh",
-        "timeout": 30
-      }]
-    }]
-  }
-}
-```
-
-Claude Code 和 Codex 共用同一个 Hook 脚本，无需额外配置。
+- TTS 并发、播放串行（避免音频重叠）
+- TTS 并发上限：`4`
+- 失败自动重试：`1` 次
+- 关键 worker 带 `panic recover`
 
 ## 路径速查
 
-| 路径 | 说明 |
-|------|------|
-| `/usr/local/bin/ispeakd` | 守护进程二进制 |
-| `/usr/local/bin/ispeak` | 运维命令（status/test/restart/recover） |
-| `~/.config/iSpeak/config.json` | TTS 配置 |
-| `~/.config/iSpeak/hook-speak.sh` | Claude Hook 脚本 |
-| `~/.config/iSpeak/hook.log` | 播报日志 |
-| `~/Library/LaunchAgents/com.iSpeak.plist` | 自启配置 |
-| `/tmp/ispeak.sock` | 播报 Socket |
-| `/tmp/iSpeak.log` | launchd 日志 |
+- `~/Library/LaunchAgents/com.iSpeak.plist`
+- `/tmp/ispeak.sock`
+- `/tmp/iSpeak.log`
+- `/usr/local/bin/ispeakd`
+- `/usr/local/bin/ispeak`
 
 ## License
 
 MIT
-
-## 项目文件
-
-```
-iSpeak/
-├── main.go              Go 源码
-├── scripts/ispeak       运行命令（status/test/restart/...）
-├── go.mod
-├── README.md
-├── ARCHITECTURE.md
-├── .gitignore
-├── configs/
-│   ├── config.example.json    TTS 配置模板
-│   ├── hook-speak.sh          Claude Hook 脚本
-│   └── com.iSpeak.plist       launchd 自启配置
-│
-部署目标:
-  /usr/local/bin/ispeakd
-  /usr/local/bin/ispeak
-  ~/.config/iSpeak/{config.json, hook-speak.sh}
-  ~/Library/LaunchAgents/com.iSpeak.plist
-```
