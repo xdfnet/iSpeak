@@ -123,7 +123,7 @@ Go 没有 Foundation 绑定，用 `exec.Command("afplay", tmpFile)`。
 ### 8. 进程防护
 
 - `handleConnection` 和 `playbackWorker` 都有 `panic recover`，避免单条异常导致进程退出。
-- `make status` 提供最小健康检查（launchd / socket / 二进制路径）。
+- `ispeak status` 提供最小健康检查（launchd / socket / 二进制路径）。
 
 ## 文件清单
 
