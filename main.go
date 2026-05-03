@@ -20,6 +20,13 @@ import (
 	"time"
 )
 
+const (
+	playQueueSize   = 128
+	ttsConcurrency  = 4
+	ttsMaxAttempts  = 2
+	ttsRetryBackoff = 400 * time.Millisecond
+)
+
 // TTS 配置 — 从环境变量读取，兼容 iAgent 的命名
 type Config struct {
 	AppID       string `json:"appId"`
@@ -86,7 +93,7 @@ type ttsAudioParams struct {
 }
 
 type playJob struct {
-	text string
+	audio []byte
 }
 
 // 调用字节跳动 TTS API，返回 MP3 音频数据
@@ -314,8 +321,9 @@ func main() {
 	}()
 
 	log.Printf("iSpeak 已启动，监听 %s", socketPath)
-	playQueue := make(chan playJob, 128)
-	go playbackWorker(cfg, playQueue)
+	playQueue := make(chan playJob, playQueueSize)
+	ttsSem := make(chan struct{}, ttsConcurrency)
+	go playbackWorker(playQueue)
 
 	for {
 		conn, err := listener.Accept()
@@ -325,25 +333,29 @@ func main() {
 			}
 			continue
 		}
-		go handleConnection(conn, playQueue)
+		go handleConnection(conn, cfg, playQueue, ttsSem)
 	}
 }
 
-func playbackWorker(cfg Config, queue <-chan playJob) {
-	for job := range queue {
-		log.Printf("TTS: %s", job.text)
-		audio, err := synthesize(cfg, job.text)
-		if err != nil {
-			log.Printf("TTS 失败: %v", err)
-			continue
+func playbackWorker(queue <-chan playJob) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("播放 worker 崩溃: %v", r)
 		}
-		if err := play(audio); err != nil {
+	}()
+	for job := range queue {
+		if err := play(job.audio); err != nil {
 			log.Printf("播放失败: %v", err)
 		}
 	}
 }
 
-func handleConnection(conn net.Conn, queue chan<- playJob) {
+func handleConnection(conn net.Conn, cfg Config, queue chan<- playJob, ttsSem chan struct{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("连接处理崩溃: %v", r)
+		}
+	}()
 	defer conn.Close()
 
 	var sb strings.Builder
@@ -363,10 +375,35 @@ func handleConnection(conn net.Conn, queue chan<- playJob) {
 		return
 	}
 
+	log.Printf("TTS: %s", cleaned)
+
+	ttsSem <- struct{}{}
+	audio, err := synthesizeWithRetry(cfg, cleaned)
+	<-ttsSem
+	if err != nil {
+		log.Printf("TTS 失败: %v", err)
+		return
+	}
+
 	select {
-	case queue <- playJob{text: cleaned}:
+	case queue <- playJob{audio: audio}:
 		log.Printf("已入队播报，队列长度=%d", len(queue))
 	default:
 		log.Printf("播放队列已满，丢弃一条消息")
 	}
+}
+
+func synthesizeWithRetry(cfg Config, text string) ([]byte, error) {
+	var lastErr error
+	for i := 1; i <= ttsMaxAttempts; i++ {
+		audio, err := synthesize(cfg, text)
+		if err == nil {
+			return audio, nil
+		}
+		lastErr = err
+		if i < ttsMaxAttempts {
+			time.Sleep(ttsRetryBackoff)
+		}
+	}
+	return nil, lastErr
 }
