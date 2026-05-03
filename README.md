@@ -4,15 +4,15 @@
 
 ## 组成
 
-- `/usr/local/bin/ispeakd`：守护进程（监听 `/tmp/ispeak.sock`）
-- `/usr/local/bin/ispeak`：命令入口（status/test/restart/logs/tail/say）
+- `~/.local/bin/ispeakd`：守护进程（监听 `/tmp/ispeak.sock`）
+- `~/.local/bin/ispeak`：命令入口（status/test/restart/logs/tail/say）
 
 ## 快速安装
 
 ```bash
 cd /path/to/iSpeak
-sudo make install
-make status
+make install
+ispeak status
 ispeak test "飞哥你好"
 ```
 
@@ -86,8 +86,8 @@ Stop Hook 命令：
 - `~/Library/LaunchAgents/com.iSpeak.plist`
 - `/tmp/ispeak.sock`
 - `/tmp/iSpeak.log`
-- `/usr/local/bin/ispeakd`
-- `/usr/local/bin/ispeak`
+- `~/.local/bin/ispeakd`
+- `~/.local/bin/ispeak`
 
 ## License
 

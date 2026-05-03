@@ -37,7 +37,7 @@ cmd_status() {
   echo "== socket =="
   ls -l "$SOCK" 2>/dev/null || echo "socket missing"
   echo "== binaries =="
-  ls -l /usr/local/bin/ispeakd /usr/local/bin/ispeak 2>/dev/null || true
+  ls -l "$HOME/.local/bin/ispeakd" "$HOME/.local/bin/ispeak" 2>/dev/null || true
 }
 
 cmd_restart() {

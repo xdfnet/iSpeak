@@ -37,7 +37,6 @@ type Config struct {
 }
 
 func loadConfig() Config {
-	// 从 iSpeak 自己的配置文件读取
 	configPaths := []string{
 		os.ExpandEnv("$HOME/.config/iSpeak/config.json"),
 	}
@@ -47,7 +46,7 @@ func loadConfig() Config {
 			continue
 		}
 		var cfg Config
-		if json.Unmarshal(data, &cfg) == nil && cfg.AppID != "" {
+		if json.Unmarshal(data, &cfg) == nil && cfg.AccessToken != "" {
 			log.Printf("配置文件: %s", p)
 			return cfg
 		}
@@ -211,10 +210,9 @@ func processEvent(payload string, chunks *[][]byte) error {
 
 	var event map[string]any
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
-		return nil // 跳过无法解析的事件
+		return nil
 	}
 
-	// 先尝试提取音频（带业务 code 的正常事件也能取到音频）
 	if b64 := extractAudioBase64(event); b64 != "" {
 		data, err := base64.StdEncoding.DecodeString(b64)
 		if err == nil {
@@ -231,7 +229,6 @@ func extractAudioBase64(event map[string]any) string {
 			return v
 		}
 	}
-	// 递归查找
 	for _, key := range []string{"data", "result", "payload"} {
 		if nested, ok := event[key].(map[string]any); ok {
 			if v := extractAudioBase64(nested); v != "" {
@@ -266,19 +263,15 @@ func play(data []byte) error {
 
 // 过滤格式符号，保留自然朗读文本
 func cleanText(text string) string {
-	// 去掉 markdown 表格 (| ... | ... |)
 	var lines []string
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
-		// 跳过纯表格分隔行 (|---|---|)
 		if strings.HasPrefix(line, "|---") || strings.HasPrefix(line, "|:---") {
 			continue
 		}
-		// 跳过分隔线
 		if strings.HasPrefix(line, "---") && strings.Count(line, "-") > 3 {
 			continue
 		}
-		// 去掉行内 markdown 符号
 		cleaned := strings.NewReplacer(
 			"**", "",
 			"*", "",
@@ -310,7 +303,6 @@ func main() {
 	}
 	defer os.Remove(socketPath)
 
-	// 优雅退出
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
