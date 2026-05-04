@@ -29,6 +29,16 @@ send_text() {
   }
 }
 
+# 根据程序名获取默认来源
+get_default_source() {
+  local prog="$(basename "$0")"
+  case "$prog" in
+    ispeak-claude) echo "claude" ;;
+    ispeak-codex) echo "codex" ;;
+    *) echo "" ;;
+  esac
+}
+
 cmd_status() {
   echo "== iSpeak 状态 =="
   launchctl list | grep -i iSpeak | awk '{print "  进程: PID="$1" 状态="$3}'
@@ -70,7 +80,7 @@ cmd_restart() {
 
 cmd_test() {
   local text="${1:-飞哥，ispeak 测试通过}"
-  send_text "$text"
+  send_text "$(build_msg "$text")"
 }
 
 cmd_logs() {
@@ -87,6 +97,27 @@ if [[ $# -eq 0 ]]; then
   exit 1
 fi
 
+# 处理全局 --source 参数
+SOURCE_FLAG=""
+if [[ "$1" == "--source" ]]; then
+  SOURCE_FLAG="$2"
+  shift 2
+fi
+
+# 如果程序名是 ispeak-claude 或 ispeak-codex，设置默认来源
+if [[ -z "$SOURCE_FLAG" ]]; then
+  SOURCE_FLAG=$(get_default_source)
+fi
+
+build_msg() {
+  local text="$1"
+  if [[ -n "$SOURCE_FLAG" ]]; then
+    echo "{source:${SOURCE_FLAG}}${text}"
+  else
+    echo "$text"
+  fi
+}
+
 case "$1" in
   status)
     cmd_status
@@ -98,9 +129,9 @@ case "$1" in
         usage
         exit 1
       fi
-      send_text "$(cat)"
+      send_text "$(build_msg "$(cat)")"
     else
-      send_text "$*"
+      send_text "$(build_msg "$*")"
     fi
     ;;
   test)
@@ -128,6 +159,6 @@ case "$1" in
     ;;
   *)
     # 兼容：ispeak "文本"
-    send_text "$*"
+    send_text "$(build_msg "$*")"
     ;;
 esac

@@ -5,7 +5,9 @@
 ## 组成
 
 - `~/.local/bin/ispeakd`：守护进程（监听 `/tmp/ispeak.sock`）
-- `~/.local/bin/ispeak`：命令入口（status/test/restart/logs/tail/say）
+- `~/.local/bin/ispeak`：命令入口
+- `~/.local/bin/ispeak-claude`：Claude Code 用（湾湾音色）
+- `~/.local/bin/ispeak-codex`：Codex 用（桃子音色）
 
 ## 快速安装
 
@@ -19,25 +21,23 @@ ispeak test "飞哥你好"
 ## 常用命令
 
 ```bash
-ispeak "任务完成"          # 日常播报（等价于 ispeak say "任务完成"）
+ispeak "任务完成"          # 日常播报（默认音色）
 ispeak test               # 自检播报（默认测试文案）
 ispeak test "飞哥你好"     # 自检播报（自定义文案）
-ispeak status             # 查看服务/socket/二进制
-ispeak restart            # 重启服务
-ispeak recover            # 重启 + 状态检查 + 测试播报
-ispeak logs 80            # 查看最近 80 行日志
-ispeak tail               # 实时日志
+ispeak status              # 查看服务/socket/音色配置
+ispeak restart             # 重启服务
+ispeak recover             # 重启 + 状态检查 + 测试播报
+ispeak logs 80             # 查看最近 80 行日志
+ispeak tail                # 实时日志
 ```
 
-## Makefile 命令
+## 音色指定
 
 ```bash
-make build    # 构建 build/ispeakd
-make install  # 停止 -> 卸载旧版本 -> 安装 -> 启动
-make deploy   # install + 配置文件部署（config/hook/plist）
+ispeak "文本"           # 默认音色（小何）
+ispeak-claude "文本"    # 湾湾音色（Claude Code）
+ispeak-codex "文本"     # 桃子音色（Codex）
 ```
-
-说明：`make` 只负责“构建与安装”，运行态操作统一走 `ispeak`。
 
 ## 配置
 
@@ -45,34 +45,64 @@ make deploy   # install + 配置文件部署（config/hook/plist）
 
 ```json
 {
-  "appId": "3059945724",
-  "accessToken": "...",
+  "apiKey": "bfa4b2a7-7465-44d2-9626-d26abfc24baa",
   "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
-  "resourceId": "seed-tts-2.0",
-  "voiceType": "zh_female_tianmeitaozi_uranus_bigtts"
+  "defaultVoice": {
+    "voice_type": "zh_female_xiaohe_uranus_bigtts",
+    "resourceId": "seed-tts-2.0"
+  },
+  "sourceVoices": {
+    "claude": {
+      "voice_type": "zh_female_wanwanxiaohe_moon_bigtts",
+      "resourceId": "seed-tts-1.0"
+    },
+    "codex": {
+      "voice_type": "zh_female_tianmeitaozi_uranus_bigtts",
+      "resourceId": "seed-tts-2.0"
+    }
+  }
 }
 ```
 
-也支持环境变量：
-- `IAGENT_TTS_APP_ID`
-- `IAGENT_TTS_ACCESS_TOKEN`
-- `IAGENT_TTS_ENDPOINT`
-- `IAGENT_TTS_RESOURCE_ID`
-- `IAGENT_TTS_VOICE_TYPE`
+## Hook 配置
 
-## Claude / Codex Hook
-
-Stop Hook 命令：
-
+Claude Code (`~/.claude/settings.json`)：
 ```json
 {
-  "type": "command",
-  "command": "bash $HOME/.config/iSpeak/hook-speak.sh",
-  "timeout": 30
+  "hooks": {
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bash /Users/admin/.config/iSpeak/hook-speak.sh claude",
+        "timeout": 30
+      }]
+    }]
+  }
 }
 ```
 
-部署时会安装到：`~/.config/iSpeak/hook-speak.sh`。
+Codex (`~/.codex/hooks.json`)：
+```json
+{
+  "hooks": {
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "bash /Users/admin/.config/iSpeak/hook-speak.sh codex",
+        "timeout": 30
+      }]
+    }]
+  }
+}
+```
+
+## 音色用途
+
+| 命令 | 音色 | 来源 |
+|------|------|------|
+| `ispeak` | 小何 | seed-tts-2.0 |
+| `ispeak-claude` | 湾湾 | Claude Code |
+| `ispeak-codex` | 桃子 | Codex |
 
 ## 稳定性策略
 
@@ -86,8 +116,10 @@ Stop Hook 命令：
 - `~/Library/LaunchAgents/com.iSpeak.plist`
 - `/tmp/ispeak.sock`
 - `/tmp/iSpeak.log`
+- `~/.config/iSpeak/config.json`
+- `~/.config/iSpeak/hook-speak.sh`
 - `~/.local/bin/ispeakd`
-- `~/.local/bin/ispeak`
+- `~/.local/bin/ispeak`, `ispeak-claude`, `ispeak-codex`
 
 ## License
 

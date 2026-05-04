@@ -16,7 +16,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -28,26 +27,18 @@ const (
 	ttsRetryBackoff = 400 * time.Millisecond
 )
 
-// 音色条目
-type VoiceEntry struct {
+// 音色信息
+type VoiceInfo struct {
 	VoiceType string `json:"voice_type"`
 	ResourceID string `json:"resourceId"`
-	Enabled bool `json:"enabled"`
-	Remark string `json:"remark"`
 }
 
-// 音色轮换状态
-var (
-	voiceIndex int
-	voiceList  []VoiceEntry
-	voiceMu    sync.Mutex
-)
-
-// TTS 配置 — 从环境变量读取，兼容 iAgent 的命名
+// TTS 配置
 type Config struct {
-	APIKey    string       `json:"apiKey"`
-	Endpoint  string       `json:"endpoint"`
-	VoiceList []VoiceEntry `json:"voiceList"` // 音色列表，用于轮换
+	APIKey       string                  `json:"apiKey"`
+	Endpoint     string                  `json:"endpoint"`
+	DefaultVoice *VoiceInfo              `json:"defaultVoice"`     // 默认音色
+	SourceVoices map[string]*VoiceInfo   `json:"sourceVoices"`     // 来源 → 音色 映射
 }
 
 func loadConfig() Config {
@@ -62,21 +53,12 @@ func loadConfig() Config {
 		var cfg Config
 		if json.Unmarshal(data, &cfg) == nil && cfg.APIKey != "" {
 			log.Printf("配置文件: %s", p)
-			// 过滤出启用的音色
-			enabledVoices := make([]VoiceEntry, 0)
-			for _, v := range cfg.VoiceList {
-				if v.Enabled {
-					enabledVoices = append(enabledVoices, v)
-				}
+			if cfg.DefaultVoice != nil {
+				log.Printf("默认音色: %s (%s)", cfg.DefaultVoice.VoiceType, cfg.DefaultVoice.ResourceID)
 			}
-			// 初始化音色列表
-			voiceMu.Lock()
-			voiceList = enabledVoices
-			voiceIndex = 0
-			if len(voiceList) > 0 {
-				log.Printf("音色轮换已启用，共 %d 个音色", len(voiceList))
+			for source, v := range cfg.SourceVoices {
+				log.Printf("来源 %s → %s (%s)", source, v.VoiceType, v.ResourceID)
 			}
-			voiceMu.Unlock()
 			return cfg
 		}
 	}
@@ -118,24 +100,16 @@ type ttsAudioParams struct {
 }
 
 type playJob struct {
-	audio []byte
+	audio      []byte
+	voiceType  string // 音色类型，用于日志
 }
 
 // 调用字节跳动 TTS API，返回 MP3 音频数据
-func synthesize(cfg Config, text string) ([]byte, error) {
-	// 获取当前音色（轮换逻辑）
-	voiceMu.Lock()
-	speaker := "zh_female_tianmeitaozi_uranus_bigtts"
-	resourceID := "seed-tts-2.0"
-	remark := ""
-	if len(voiceList) > 0 {
-		speaker = voiceList[voiceIndex].VoiceType
-		resourceID = voiceList[voiceIndex].ResourceID
-		remark = voiceList[voiceIndex].Remark
-		voiceIndex = (voiceIndex + 1) % len(voiceList)
-		log.Printf("音色轮换: %s (%s) resourceId: %s, 索引 %d/%d", speaker, remark, resourceID, voiceIndex, len(voiceList))
-	}
-	voiceMu.Unlock()
+func synthesize(cfg Config, text string, voice *VoiceInfo) ([]byte, error) {
+	speaker := voice.VoiceType
+	resourceID := voice.ResourceID
+
+	log.Printf("音色: %s (resourceId: %s)", speaker, resourceID)
 
 	reqBody := ttsRequest{
 		User:      ttsUser{UID: "ttsd-" + time.Now().Format("150405")},
@@ -401,7 +375,17 @@ func handleConnection(conn net.Conn, cfg Config, queue chan<- playJob, ttsSem ch
 		return
 	}
 
-	cleaned := cleanText(text)
+	// 解析音色前缀 {voice:桃子}文本 或 {source:claude}文本
+	voice, content := extractVoicePrefix(text, cfg)
+	if voice == nil {
+		voice = cfg.DefaultVoice
+	}
+	if voice == nil {
+		log.Printf("未配置默认音色")
+		return
+	}
+
+	cleaned := cleanText(content)
 	if cleaned == "" {
 		return
 	}
@@ -409,7 +393,7 @@ func handleConnection(conn net.Conn, cfg Config, queue chan<- playJob, ttsSem ch
 	log.Printf("TTS: %s", cleaned)
 
 	ttsSem <- struct{}{}
-	audio, err := synthesizeWithRetry(cfg, cleaned)
+	audio, err := synthesizeWithRetry(cfg, cleaned, voice)
 	<-ttsSem
 	if err != nil {
 		log.Printf("TTS 失败: %v", err)
@@ -417,17 +401,44 @@ func handleConnection(conn net.Conn, cfg Config, queue chan<- playJob, ttsSem ch
 	}
 
 	select {
-	case queue <- playJob{audio: audio}:
+	case queue <- playJob{audio: audio, voiceType: voice.VoiceType}:
 		log.Printf("已入队播报，队列长度=%d", len(queue))
 	default:
 		log.Printf("播放队列已满，丢弃一条消息")
 	}
 }
 
-func synthesizeWithRetry(cfg Config, text string) ([]byte, error) {
+// 解析消息中的音色前缀，返回 VoiceInfo
+func extractVoicePrefix(text string, cfg Config) (voice *VoiceInfo, content string) {
+	// 格式: {source:claude}文本
+	if strings.HasPrefix(text, "{source:") {
+		end := strings.Index(text, "}")
+		if end > 0 {
+			source := text[8:end]
+			if v, ok := cfg.SourceVoices[source]; ok {
+				voice = v
+			}
+			content = text[end+1:]
+			return
+		}
+	}
+	// 格式: {voice:桃子}文本 (兼容旧格式，但已废弃)
+	if strings.HasPrefix(text, "{voice:") {
+		end := strings.Index(text, "}")
+		if end > 0 {
+			// 不再支持，按默认处理
+			content = text[end+1:]
+			return
+		}
+	}
+	content = text
+	return
+}
+
+func synthesizeWithRetry(cfg Config, text string, voice *VoiceInfo) ([]byte, error) {
 	var lastErr error
 	for i := 1; i <= ttsMaxAttempts; i++ {
-		audio, err := synthesize(cfg, text)
+		audio, err := synthesize(cfg, text, voice)
 		if err == nil {
 			return audio, nil
 		}
