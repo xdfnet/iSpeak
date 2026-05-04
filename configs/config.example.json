@@ -1,7 +1,18 @@
 {
-  "appId": "your-app-id",
-  "accessToken": "your-access-token",
+  "apiKey": "your-api-key",
   "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
-  "resourceId": "seed-tts-2.0",
-  "voiceType": "zh_female_tianmeitaozi_uranus_bigtts"
+  "defaultVoice": {
+    "voice_type": "zh_female_xiaohe_uranus_bigtts",
+    "resourceId": "seed-tts-2.0"
+  },
+  "sourceVoices": {
+    "claude": {
+      "voice_type": "zh_female_wanwanxiaohe_moon_bigtts",
+      "resourceId": "seed-tts-1.0"
+    },
+    "codex": {
+      "voice_type": "zh_female_tianmeitaozi_uranus_bigtts",
+      "resourceId": "seed-tts-2.0"
+    }
+  }
 }

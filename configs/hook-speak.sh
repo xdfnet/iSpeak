@@ -3,6 +3,9 @@
 # iAgent 调用 Claude 时设 ISPEAK_SKIP=1，此时跳过（iAgent 自己播）
 [[ "$ISPEAK_SKIP" == "1" ]] && exit 0
 
+# 来源参数: claude 或 codex
+SOURCE="${1:-claude}"
+
 SOCK=/tmp/ispeak.sock
 LOG="$HOME/.config/iSpeak/hook.log"
 
@@ -67,11 +70,12 @@ print('\n'.join(unique))
   fi
 fi
 
+echo "SOURCE: $SOURCE" >> "$LOG"
 echo "TEXT_LEN: ${#all_text}" >> "$LOG"
 echo "PREVIEW: ${all_text:0:150}" >> "$LOG"
 
 if [[ -n "$all_text" && -S "$SOCK" ]]; then
-  echo "$all_text" | nc -U -w5 "$SOCK" 2>> "$LOG"
+  echo "{source:${SOURCE}}$all_text" | nc -U -w5 "$SOCK" 2>> "$LOG"
   echo "SPOKE: OK" >> "$LOG"
 else
   echo "SPOKE: SKIP" >> "$LOG"

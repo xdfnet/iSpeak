@@ -16,10 +16,13 @@ install: build
 	rm -f /tmp/ispeak.sock
 	@# 2) 清理旧版本
 	rm -f $(BIN_DIR)/iSpeak $(BIN_DIR)/ispeakd $(BIN_DIR)/ispeak $(BIN_DIR)/speak
+	rm -f $(BIN_DIR)/ispeak-claude $(BIN_DIR)/ispeak-codex
 	@# 3) 安装
 	mkdir -p $(BIN_DIR)
 	install -m 0755 $(BIN) $(DST)
 	install -m 0755 $(CURDIR)/scripts/ispeak $(BIN_DIR)/ispeak
+	ln -sf $(BIN_DIR)/ispeak $(BIN_DIR)/ispeak-claude
+	ln -sf $(BIN_DIR)/ispeak $(BIN_DIR)/ispeak-codex
 	sed 's|BINARY_PATH_PLACEHOLDER|$(DST)|' configs/com.iSpeak.plist > $(PLIST)
 	@# 4) 启动
 	launchctl load $(PLIST)
