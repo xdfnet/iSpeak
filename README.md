@@ -104,6 +104,16 @@ Codex (`~/.codex/hooks.json`)：
 | `ispeak-claude` | 湾湾 | Claude Code |
 | `ispeak-codex` | 桃子 | Codex |
 
+## CLI 对话测试
+
+```bash
+# Claude Code
+claude -p "说一句话"
+
+# Codex
+codex exec "说一句话"
+```
+
 ## 稳定性策略
 
 - TTS 并发、播放串行（避免音频重叠）
