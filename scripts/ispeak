@@ -30,14 +30,35 @@ send_text() {
 }
 
 cmd_status() {
-  echo "== launchd =="
-  launchctl list | grep -i iSpeak || echo "com.iSpeak not loaded"
-  echo "== launchd detail =="
-  launchctl print "gui/$(id -u)/com.iSpeak" 2>/dev/null | sed -n '1,40p' || true
-  echo "== socket =="
-  ls -l "$SOCK" 2>/dev/null || echo "socket missing"
-  echo "== binaries =="
-  ls -l "$HOME/.local/bin/ispeakd" "$HOME/.local/bin/ispeak" 2>/dev/null || true
+  echo "== iSpeak 状态 =="
+  launchctl list | grep -i iSpeak | awk '{print "  进程: PID="$1" 状态="$3}'
+  echo "  Socket: $SOCK"
+  ls -l "$SOCK" 2>/dev/null | awk '{print "  "$1" "$9}' || echo "  ✗ socket 缺失"
+  echo ""
+  echo "== 音色列表 =="
+  local cfg="$HOME/.config/iSpeak/config.json"
+  if [[ -f "$cfg" ]]; then
+    python3 - "$cfg" <<'PYEOF' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        cfg = json.load(f)
+    voices = cfg.get("voiceList", [])
+    enabled = [v for v in voices if v.get("enabled", True)]
+    disabled = [v for v in voices if not v.get("enabled", True)]
+    print(f"  启用中 ({len(enabled)}):")
+    for v in enabled:
+        print(f"    ✓ {v.get('remark', v['voice_type'])}")
+    if disabled:
+        print(f"  已禁用 ({len(disabled)}):")
+        for v in disabled:
+            print(f"    ✗ {v.get('remark', v['voice_type'])}")
+except Exception as e:
+    print(f"  解析失败: {e}")
+PYEOF
+  else
+    echo "  配置文件不存在: $cfg"
+  fi
 }
 
 cmd_restart() {

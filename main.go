@@ -32,6 +32,8 @@ const (
 type VoiceEntry struct {
 	VoiceType string `json:"voice_type"`
 	ResourceID string `json:"resourceId"`
+	Enabled bool `json:"enabled"`
+	Remark string `json:"remark"`
 }
 
 // 音色轮换状态
@@ -60,9 +62,16 @@ func loadConfig() Config {
 		var cfg Config
 		if json.Unmarshal(data, &cfg) == nil && cfg.APIKey != "" {
 			log.Printf("配置文件: %s", p)
+			// 过滤出启用的音色
+			enabledVoices := make([]VoiceEntry, 0)
+			for _, v := range cfg.VoiceList {
+				if v.Enabled {
+					enabledVoices = append(enabledVoices, v)
+				}
+			}
 			// 初始化音色列表
 			voiceMu.Lock()
-			voiceList = cfg.VoiceList
+			voiceList = enabledVoices
 			voiceIndex = 0
 			if len(voiceList) > 0 {
 				log.Printf("音色轮换已启用，共 %d 个音色", len(voiceList))
@@ -118,11 +127,13 @@ func synthesize(cfg Config, text string) ([]byte, error) {
 	voiceMu.Lock()
 	speaker := "zh_female_tianmeitaozi_uranus_bigtts"
 	resourceID := "seed-tts-2.0"
+	remark := ""
 	if len(voiceList) > 0 {
 		speaker = voiceList[voiceIndex].VoiceType
 		resourceID = voiceList[voiceIndex].ResourceID
+		remark = voiceList[voiceIndex].Remark
 		voiceIndex = (voiceIndex + 1) % len(voiceList)
-		log.Printf("音色轮换: %s (resourceId: %s, 索引 %d/%d)", speaker, resourceID, voiceIndex, len(voiceList))
+		log.Printf("音色轮换: %s (%s) resourceId: %s, 索引 %d/%d", speaker, remark, resourceID, voiceIndex, len(voiceList))
 	}
 	voiceMu.Unlock()
 
