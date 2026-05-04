@@ -45,7 +45,7 @@ cmd_status() {
   echo "  Socket: $SOCK"
   ls -l "$SOCK" 2>/dev/null | awk '{print "  "$1" "$9}' || echo "  ✗ socket 缺失"
   echo ""
-  echo "== 音色列表 =="
+  echo "== 音色配置 =="
   local cfg="$HOME/.config/iSpeak/config.json"
   if [[ -f "$cfg" ]]; then
     python3 - "$cfg" <<'PYEOF' 2>/dev/null
@@ -53,16 +53,13 @@ import json, sys
 try:
     with open(sys.argv[1]) as f:
         cfg = json.load(f)
-    voices = cfg.get("voiceList", [])
-    enabled = [v for v in voices if v.get("enabled", True)]
-    disabled = [v for v in voices if not v.get("enabled", True)]
-    print(f"  启用中 ({len(enabled)}):")
-    for v in enabled:
-        print(f"    ✓ {v.get('remark', v['voice_type'])}")
-    if disabled:
-        print(f"  已禁用 ({len(disabled)}):")
-        for v in disabled:
-            print(f"    ✗ {v.get('remark', v['voice_type'])}")
+    dv = cfg.get("defaultVoice", {})
+    if dv:
+        print(f"  默认音色: {dv.get('voice_type', '?')} ({dv.get('resourceId', '?')})")
+    sv = cfg.get("sourceVoices", {})
+    if sv:
+        for src, v in sv.items():
+            print(f"  {src} → {v.get('voice_type', '?')} ({v.get('resourceId', '?')})")
 except Exception as e:
     print(f"  解析失败: {e}")
 PYEOF

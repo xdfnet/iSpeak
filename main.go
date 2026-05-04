@@ -412,21 +412,10 @@ func handleConnection(conn net.Conn, cfg Config, queue chan<- playJob, ttsSem ch
 func extractVoicePrefix(text string, cfg Config) (voice *VoiceInfo, content string) {
 	// 格式: {source:claude}文本
 	if strings.HasPrefix(text, "{source:") {
-		end := strings.Index(text, "}")
-		if end > 0 {
-			source := text[8:end]
-			if v, ok := cfg.SourceVoices[source]; ok {
+		if end := strings.Index(text, "}"); end > 0 {
+			if v, ok := cfg.SourceVoices[text[8:end]]; ok {
 				voice = v
 			}
-			content = text[end+1:]
-			return
-		}
-	}
-	// 格式: {voice:桃子}文本 (兼容旧格式，但已废弃)
-	if strings.HasPrefix(text, "{voice:") {
-		end := strings.Index(text, "}")
-		if end > 0 {
-			// 不再支持，按默认处理
 			content = text[end+1:]
 			return
 		}
