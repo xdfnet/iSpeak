@@ -73,14 +73,9 @@ ispeak test "iSpeak 准备好了"
 ## 全部命令
 
 ```bash
-ispeak "消息"           # 使用默认音色播报
-ispeak test            # 自检播报
-ispeak test "你好"     # 自定义内容自检
-ispeak status          # 查看服务状态、Socket、配置
-ispeak restart         # 重启服务
-ispeak recover        # 重启 + 状态检查 + 自检
-ispeak logs 80        # 查看最近 80 行日志
-ispeak tail           # 实时日志
+ispeak "消息"    # 播报
+ispeak status    # 服务状态
+ispeak restart   # 重启服务
 ```
 
 语音专属快捷命令（指向 ispeak 的软链接）：
