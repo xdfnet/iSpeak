@@ -23,7 +23,10 @@ make help      # 显示帮助
 ispeak (CLI, bash)
   └─ nc -U ~/.config/iSpeak/ispeak.sock
       └─ ispeakd (Go daemon)
-           ├─ TTS Context Manager (single in-flight, cancel on new request)
+           ├─ Task Manager (追踪所有 TTS 任务状态)
+           │    └─ Task: pending → synthesizing → completed/failed/canceled
+           ├─ TTS Context Manager (single in-flight)
+           │    └─ 取消策略：仅取消 pending 任务，正在合成的不打断
            └─ playbackWorker (sequential by seq#, buffered reorder)
                 └─ afplay
 ```
@@ -54,9 +57,17 @@ CLI 与 daemon 通过 socket 传输原始文本，支持音色前缀：
 
 新消息到达时：
 1. 打断正在播放的 afplay (SIGKILL)
-2. 取消正在进行的 TTS 合成 (context cancel)
+2. 取消旧的 pending 任务（正在合成的不打断，让它跑完）
+3. 创建新任务开始合成
 
-只为最终想听的那条消息付费。
+**任务状态流转：**
+```
+pending → synthesizing → completed  (正常完成，入队播放)
+                      → failed     (合成失败)
+pending → canceled     (被新消息取消，不入队)
+```
+
+只为最终想听的那条消息付费。pending 状态被取消时不产生费用。
 
 ## 配置
 
