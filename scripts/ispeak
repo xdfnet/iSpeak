@@ -2,7 +2,7 @@
 # ispeak — iSpeak 控制命令
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 SOCK="$HOME/.config/iSpeak/ispeak.sock"
 PLIST="$HOME/Library/LaunchAgents/com.iSpeak.plist"
 LOG="$HOME/.config/iSpeak/ispeak.log"

@@ -2,7 +2,7 @@
 # iSpeak 一键安装脚本
 set -euo pipefail
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 CONFIG_DIR="$HOME/.config/iSpeak"
 BIN_DIR="$HOME/.local/bin"
 RED='\033[0;31m'
