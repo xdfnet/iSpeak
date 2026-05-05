@@ -33,20 +33,29 @@ ispeak-codex "构建完成，耗时 12 秒"
 
 ## 快速上手
 
+**一行命令搞定一切：**
+
 ```bash
-# 1. 安装
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/xdfnet/iSpeak/master/setup.sh)"
+```
+
+脚本会交互式完成：
+1. 安装 ispeakd 服务
+2. 引导输入 API Key
+3. 自动配置 Claude Code / Codex 的 Hook
+
+**或手动安装：**
+
+```bash
 git clone https://github.com/你的用户名/ispeak.git && cd ispeak && make deploy
+# 然后手动编辑 ~/.config/iSpeak/config.json 填入 API Key
+```
 
-# 2. 配置
-# 编辑 ~/.config/iSpeak/config.json，填入火山引擎 API Key
-# Key 获取：https://console.volcengine.com/tts
+安装完成后验证：
 
-# 3. 验证
+```bash
 ispeak status
 ispeak test "iSpeak 准备好了"
-
-# 4. 接入 Claude Code 或 Codex
-# 参考下方集成说明，配置 Stop Hook
 ```
 
 ## 工作原理
