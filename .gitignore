@@ -4,6 +4,3 @@
 # Build artifacts
 build/
 iSpeak
-
-# Local agent/context files
-AGENTS.md
