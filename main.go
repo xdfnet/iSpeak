@@ -45,6 +45,76 @@ var (
 	nextSeq uint64 = 0
 )
 
+// 任务状态
+type TaskStatus int
+
+const (
+	TaskStatusPending      TaskStatus = iota // 等待合成
+	TaskStatusSynthesizing                  // 合成中
+	TaskStatusCompleted                     // 合成完成，已入队
+	TaskStatusFailed                        // 合成失败
+	TaskStatusCanceled                       // 被新请求取消
+)
+
+// 单个 TTS 任务
+type Task struct {
+	ID      uint64
+	Text    string
+	Status  TaskStatus
+	Seq     uint64  // 播放序号（完成后填充）
+	Audio   []byte  // 音频数据（完成后填充）
+	Cancel  func()  // 取消函数
+	Canceled bool   // 是否已被取消
+}
+
+// 全局任务管理
+var (
+	taskMu         sync.Mutex
+	tasks          = make(map[uint64]*Task) // taskID → Task
+	currentTaskID  uint64 = 0
+	taskIDMu       sync.Mutex              // 专门给 nextTaskID 用的锁
+	activeTaskID   uint64 = 0               // 当前激活的任务ID
+)
+
+func nextTaskID() uint64 {
+	taskIDMu.Lock()
+	defer taskIDMu.Unlock()
+	currentTaskID++
+	return currentTaskID
+}
+
+func createTask(text string) *Task {
+	taskMu.Lock()
+	defer taskMu.Unlock()
+	id := nextTaskID()
+	task := &Task{ID: id, Text: text, Status: TaskStatusPending}
+	tasks[id] = task
+	log.Printf("任务创建: id=%d text=%s", id, text)
+	return task
+}
+
+func getTask(id uint64) *Task {
+	taskMu.Lock()
+	defer taskMu.Unlock()
+	return tasks[id]
+}
+
+func setActiveTask(id uint64) {
+	taskMu.Lock()
+	defer taskMu.Unlock()
+	activeTaskID = id
+}
+
+func cancelTask(id uint64) {
+	taskMu.Lock()
+	defer taskMu.Unlock()
+	if task, ok := tasks[id]; ok && task.Status == TaskStatusPending {
+		task.Canceled = true
+		task.Status = TaskStatusCanceled
+		log.Printf("任务取消: id=%d", id)
+	}
+}
+
 // 进程级 temp 目录（进程退出时清理）
 var tempDir string
 
@@ -128,6 +198,7 @@ type ttsAudioParams struct {
 }
 
 type playJob struct {
+	taskID    uint64
 	seq       uint64
 	enqueuedAt time.Time
 	audio     []byte
@@ -535,35 +606,54 @@ func handleConnection(conn net.Conn, queue chan<- playJob, interruptCh chan<- st
 
 	log.Printf("TTS: %s", cleaned)
 
-	// 打断当前播放和 TTS 合成
+	// 打断当前播放
 	select {
 	case interruptCh <- struct{}{}:
 		log.Printf("打断信号已发送")
 	default:
 	}
 
-	// 取消旧的 TTS 上下文
+	// 取消旧的 pending 任务（正在合成的不管）
+	oldActiveID := activeTaskID
+	if oldActiveID > 0 {
+		cancelTask(oldActiveID)
+	}
+
+	// 创建新任务
+	task := createTask(cleaned)
+	task.Status = TaskStatusSynthesizing
+	setActiveTask(task.ID)
+
+	// 创建新的 TTS context
 	ttsCtxMu.Lock()
 	if ttsCancel != nil {
 		ttsCancel()
-		log.Printf("TTS 旧请求已取消")
 	}
 	ttsCtx, ttsCancel = context.WithCancel(context.Background())
 	ttsCtxMu.Unlock()
 
+	// 合成
 	audio, err := synthesizeWithRetry(ttsCtx, cfg, cleaned, voice)
+	task.Status = TaskStatusFailed
+
 	if err != nil {
-		if ttsCtx.Err() == context.Canceled {
-			log.Printf("TTS 已取消（新请求）")
-		} else {
-			log.Printf("TTS 失败: %v", err)
-		}
+		log.Printf("TTS 失败: id=%d err=%v", task.ID, err)
 		return
 	}
 
+	// 合成完成后检查是否被取消
+	if task.Canceled {
+		log.Printf("任务已取消，跳过入队: id=%d", task.ID)
+		return
+	}
+
+	// 入队
+	task.Status = TaskStatusCompleted
 	seq := nextSequence()
-	queue <- playJob{seq: seq, enqueuedAt: time.Now(), audio: audio, voiceType: voice.VoiceType}
-	log.Printf("已入队播报，序号=%d", seq)
+	task.Seq = seq
+	task.Audio = audio
+	queue <- playJob{taskID: task.ID, seq: seq, enqueuedAt: time.Now(), audio: audio, voiceType: voice.VoiceType}
+	log.Printf("已入队播报: id=%d seq=%d", task.ID, seq)
 }
 
 // 解析消息中的音色前缀，返回 VoiceInfo
