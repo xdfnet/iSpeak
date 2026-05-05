@@ -496,8 +496,6 @@ func playAudio(data []byte) *exec.Cmd {
 	return cmd
 }
 
-// 播放并失败重试一次
-
 func handleConnection(conn net.Conn, queue chan<- playJob, interruptCh chan<- struct{}) {
 	defer func() {
 		if r := recover(); r != nil {
