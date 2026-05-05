@@ -1,5 +1,9 @@
 # iSpeak
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Go Version](https://img.shields.io/badge/Go-1.26-blue)](https://golang.org/dl/)
+![Platform](https://img.shields.io/badge/platform-macOS-green)
+
 iSpeak 让 AI 编程助手开口说话。你写代码，它播结果——眼睛休息，耳朵来听。
 
 适合 Claude Code 或 Codex 常驻后台的开发者。AI 完成任务后自动播报；你发新消息时，旧播报立即中断，不花冤枉钱。
