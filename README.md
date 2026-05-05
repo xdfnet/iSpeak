@@ -1,83 +1,99 @@
 # iSpeak
 
-A lightweight local TTS service that converts text to speech via ByteDance Volcano Engine and plays audio sequentially. Built for AI coding assistants (Claude Code, Codex) to vocalize their responses.
+**iSpeak** turns your AI coding assistant's responses into voice — so you can listen while you code instead of staring at the screen.
 
-## Features
+Built for developers who keep Claude Code or Codex running in the background. When your AI finishes a task, it speaks the result. When you send a new message, it automatically cancels the old one — no wasted API calls, no interruption lag.
 
-- **Cost-saving interruption**: New messages cancel in-flight TTS synthesis and interrupt playback — pay only for what you actually hear
-- **Sequential playback**: Global sequence numbers ensure audio plays in order, never overlapping
-- **Hot config reload**: Configuration changes take effect immediately without restarting the service
-- **Multi-voice support**: Different voices for different sources (e.g., Claude uses one voice, Codex uses another)
-- **Unix Socket communication**: Minimal dependencies, works reliably on macOS
-
-## Architecture
+## What It Sounds Like
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  ispeak / ispeak-claude / ispeak-codex (CLI)       │
-│         nc -U /tmp/ispeak.sock                      │
-└─────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────┐
-│  ispeakd (Daemon)                                  │
-│  ┌─────────────────────────────────────────────┐   │
-│  │  TTS Context Manager                         │   │
-│  │  (single in-flight request, cancel on new)   │   │
-│  └─────────────────────────────────────────────┘   │
-│  ┌─────────────────────────────────────────────┐   │
-│  │  Playback Worker                             │   │
-│  │  (sequential by seq#, buffered reorder)     │   │
-│  └─────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────┘
-                          │
-                          ▼
-              ┌───────────────────┐
-              │  afplay (macOS)   │
-              └───────────────────┘
+# Default: warm female voice
+ispeak "Pull request merged, 3 tests passed"
+
+# Claude mode: different voice for Claude Code
+ispeak-claude "Code review complete, 2 suggestions"
+
+# Codex mode: yet another voice
+ispeak-codex "Build finished in 12 seconds"
 ```
 
-## Quick Start
+## Why iSpeak
+
+| Problem | Solution |
+|---------|----------|
+| TTS bills add up when AI generates multiple responses | New message cancels in-flight TTS — pay only for the final one |
+| Audio plays out of order when responses arrive at different speeds | Global sequence numbers guarantee sequential playback |
+| Config changes require daemon restart | Hot reload — edit `config.json`, changes take effect immediately |
+| Generic voice gets boring | Per-source voices — Claude and Codex each sound distinct |
+
+## Get Started
 
 ```bash
-# Clone and install
-git clone https://github.com/yourname/ispeak.git
-cd ispeak
-make install
+# 1. Install
+git clone https://github.com/yourname/ispeak.git && cd ispeak && make install
 
-# Verify
+# 2. Configure
+# Edit ~/.config/iSpeak/config.json with your Volcengine API key
+# Get one free at https://console.volcengine.com/tts
+
+# 3. Verify
 ispeak status
-ispeak test "Hello, world"
+ispeak test "iSpeak is ready"
+
+# 4. Connect to Claude Code or Codex
+# (add the Stop hook — see Integration section below)
 ```
 
-## Usage
+## How It Works
 
-```bash
-ispeak "Task completed"           # Speak with default voice
-ispeak test                       # Self-test
-ispeak test "Custom message"      # Self-test with custom text
-ispeak status                     # Check service and socket status
-ispeak restart                    # Restart the daemon
-ispeak recover                    # Restart + status + test
-ispeak logs 80                   # View last 80 log lines
-ispeak tail                       # Live log stream
+```
+You: "refactor the auth module"
+        │
+        ▼
+┌─────────────────────────────────────────────────────┐
+│  ispeakd — single daemon on your Mac               │
+│                                                       │
+│   Receives text via Unix Socket                    │
+│         │                                            │
+│         ▼                                           │
+│   TTS Context Manager                              │
+│   (cancels previous request on new message)        │
+│         │                                            │
+│         ▼                                           │
+│   Playback Worker                                  │
+│   (sequential by seq#, buffers out-of-order)        │
+│         │                                            │
+│         ▼                                           │
+│   afplay → your speakers/headphones                │
+└─────────────────────────────────────────────────────┘
 ```
 
-### Voice Selection
+## All Commands
 
 ```bash
-ispeak "message"           # Default voice
-ispeak-claude "message"    # Claude's dedicated voice
-ispeak-codex "message"     # Codex's dedicated voice
+ispeak "message"           # Speak with default voice
+ispeak test               # Self-test with default message
+ispeak test "hi"          # Self-test with custom message
+ispeak status             # Check daemon, socket, voice config
+ispeak restart            # Restart daemon
+ispeak recover           # Restart + status check + test
+ispeak logs 80          # Tail last 80 log lines
+ispeak tail              # Live log stream
+```
+
+Voice-specific shortcuts (symlinks to `ispeak`):
+```bash
+ispeak-claude "msg"      # Claude's dedicated voice
+ispeak-codex "msg"       # Codex's dedicated voice
 ```
 
 ## Configuration
 
-Create `~/.config/iSpeak/config.json`:
+`~/.config/iSpeak/config.json`:
 
 ```json
 {
-  "apiKey": "your-volcengine-api-key",
+  "apiKey": "volcengine-api-key",
   "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
   "defaultVoice": {
     "voice_type": "zh_female_mizai_uranus_bigtts",
@@ -96,13 +112,14 @@ Create `~/.config/iSpeak/config.json`:
 }
 ```
 
-**Get an API key**: Sign up at [Volcengine Console](https://console.volcengine.com/tts) and create a TTS instance.
+Browse available voices at [Volcengine TTS](https://console.volcengine.com/tts). Any voice with `voice_type` and `resourceId` from their catalog works.
 
-## Claude Code / Codex Integration
+## Integration
 
-Add a Stop hook to your AI assistant's settings:
+### Claude Code
 
-**Claude Code** (`~/.claude/settings.json`):
+Add to `~/.claude/settings.json`:
+
 ```json
 {
   "hooks": {
@@ -117,7 +134,10 @@ Add a Stop hook to your AI assistant's settings:
 }
 ```
 
-**Codex** (`~/.codex/hooks.json`):
+### Codex
+
+Add to `~/.codex/hooks.json`:
+
 ```json
 {
   "hooks": {
@@ -132,26 +152,24 @@ Add a Stop hook to your AI assistant's settings:
 }
 ```
 
-## Development
+## Developer Commands
 
 ```bash
-make build    # Compile the daemon
-make install  # Install to ~/.local/bin and start service
-make deploy   # Full deployment (install + config files)
+make build    # Compile ispeakd
+make install  # Install to ~/.local/bin and start launchd service
+make deploy   # Full deployment (install + copy config examples)
 ```
 
 ## File Locations
 
-| Path | Description |
-|------|-------------|
-| `~/Library/LaunchAgents/com.iSpeak.plist` | macOS launchd service |
-| `/tmp/ispeak.sock` | Unix domain socket |
-| `/tmp/iSpeak.log` | Log output |
-| `~/.config/iSpeak/config.json` | Configuration |
+| File | Purpose |
+|------|---------|
+| `~/Library/LaunchAgents/com.iSpeak.plist` | macOS auto-start service |
+| `/tmp/ispeak.sock` | Daemon listens here |
+| `/tmp/iSpeak.log` | All logs |
+| `~/.config/iSpeak/config.json` | Your API key and voices |
 | `~/.config/iSpeak/hook-speak.sh` | Claude/Codex hook script |
-| `~/.local/bin/ispeakd` | Daemon binary |
-| `~/.local/bin/ispeak*` | CLI symlinks |
 
 ## License
 
-MIT
+MIT — use it freely, change it freely, break it freely.
