@@ -35,7 +35,7 @@ cmd_restart() {
 case "${1:-}" in
   status) cmd_status ;;
   restart) cmd_restart ;;
-  -v|--version) echo "iSpeak $VERSION" ;;
+  version|-v|--version) echo "iSpeak $VERSION" ;;
   "")
     echo "iSpeak $VERSION"
     echo ""
