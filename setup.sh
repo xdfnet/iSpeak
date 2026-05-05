@@ -157,9 +157,7 @@ log "安装完成！"
 echo ""
 
 if ! command -v jq &>/dev/null; then
-  echo "提示: 安装 jq 可以自动配置 Hook"
+  echo "提示: 安装 jq 可以自动配置 Claude Code Hook"
   echo "  brew install jq"
   echo ""
 fi
-echo "请重启 Claude Code / Codex 让 Hook 生效"
-echo ""
