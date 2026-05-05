@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,16 +17,38 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
 const (
-	playQueueSize   = 128
-	ttsConcurrency  = 4
+	playQueueSize  = 128
+	playBufferMax  = 64              // 缓冲队列上限
+	playSeqTimeout = 60 * time.Second // seq 等待超时
 	ttsMaxAttempts  = 2
 	ttsRetryBackoff = 400 * time.Millisecond
 )
+
+// 全局 TTS 上下文管理（只有一个 TTS 在跑，新请求取消旧请求）
+var (
+	ttsCtxMu   sync.Mutex
+	ttsCtx     context.Context
+	ttsCancel  context.CancelFunc
+)
+
+// 全局序号分配器
+var (
+	seqMu   sync.Mutex
+	nextSeq uint64 = 0
+)
+
+func nextSequence() uint64 {
+	seqMu.Lock()
+	defer seqMu.Unlock()
+	nextSeq++
+	return nextSeq
+}
 
 // 音色信息
 type VoiceInfo struct {
@@ -100,12 +123,14 @@ type ttsAudioParams struct {
 }
 
 type playJob struct {
-	audio      []byte
-	voiceType  string // 音色类型，用于日志
+	seq       uint64
+	enqueuedAt time.Time
+	audio     []byte
+	voiceType string // 音色类型，用于日志
 }
 
 // 调用字节跳动 TTS API，返回 MP3 音频数据
-func synthesize(cfg Config, text string, voice *VoiceInfo) ([]byte, error) {
+func synthesize(ctx context.Context, cfg Config, text string, voice *VoiceInfo) ([]byte, error) {
 	speaker := voice.VoiceType
 	resourceID := voice.ResourceID
 
@@ -129,7 +154,7 @@ func synthesize(cfg Config, text string, voice *VoiceInfo) ([]byte, error) {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", cfg.Endpoint, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.Endpoint, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -253,27 +278,6 @@ func extractAudioBase64(event map[string]any) string {
 }
 
 // 用 afplay 播放 MP3
-func play(data []byte) error {
-	tmpDir := os.TempDir()
-	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("ttsd-%d.mp3", time.Now().UnixNano()))
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	defer os.Remove(tmpFile)
-
-	cmd := exec.Command("/usr/bin/afplay", tmpFile)
-	startedAt := time.Now()
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("afplay start: %w", err)
-	}
-	log.Printf("播放开始: %s", filepath.Base(tmpFile))
-	if err := cmd.Wait(); err != nil {
-		return err
-	}
-	log.Printf("播放完成: %s, 耗时=%s", filepath.Base(tmpFile), time.Since(startedAt).Round(time.Millisecond))
-	return nil
-}
-
 // 过滤格式符号，保留自然朗读文本
 func cleanText(text string) string {
 	var lines []string
@@ -327,8 +331,8 @@ func main() {
 
 	log.Printf("iSpeak 已启动，监听 %s", socketPath)
 	playQueue := make(chan playJob, playQueueSize)
-	ttsSem := make(chan struct{}, ttsConcurrency)
-	go playbackWorker(playQueue)
+	interruptCh := make(chan struct{}, 1) // 新请求打断信号
+	go playbackWorker(playQueue, interruptCh)
 
 	for {
 		conn, err := listener.Accept()
@@ -338,30 +342,113 @@ func main() {
 			}
 			continue
 		}
-		go handleConnection(conn, cfg, playQueue, ttsSem)
+		go handleConnection(conn, playQueue, interruptCh)
 	}
 }
 
-func playbackWorker(queue <-chan playJob) {
+func playbackWorker(queue <-chan playJob, interruptCh <-chan struct{}) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("播放 worker 崩溃: %v", r)
 		}
 	}()
-	for job := range queue {
-		if err := play(job.audio); err != nil {
-			log.Printf("播放失败: %v", err)
+
+	var (
+		nextExpected uint64              = 1
+		buffer      map[uint64]playJob  = make(map[uint64]playJob)
+		currentCmd  *exec.Cmd           // 当前播放的 afplay 进程
+		cmdMu       sync.Mutex           // 保护 currentCmd
+	)
+
+	for {
+		select {
+		case <-interruptCh:
+			cmdMu.Lock()
+			if currentCmd != nil && currentCmd.Process != nil {
+			 log.Printf("打断当前播放")
+			 currentCmd.Process.Kill()
+			}
+			cmdMu.Unlock()
+		case job := <-queue:
+			if job.seq == nextExpected {
+				// 正好是下一个该播放的，直接播放
+				log.Printf("播放序号=%d", job.seq)
+				cmd := playAudio(job.audio)
+				cmdMu.Lock()
+				currentCmd = cmd
+				cmdMu.Unlock()
+			 cmd.Wait()
+			 cmdMu.Lock()
+			 currentCmd = nil
+			 cmdMu.Unlock()
+				nextExpected++
+				// 吐出缓冲中积压的 job
+				for {
+					if buffered, ok := buffer[nextExpected]; ok {
+						// 检查超时
+						if time.Since(buffered.enqueuedAt) > playSeqTimeout {
+							log.Printf("序号=%d 等待超时，跳过", nextExpected)
+							delete(buffer, nextExpected)
+							nextExpected++
+							continue
+						}
+						log.Printf("播放序号=%d (缓冲)", buffered.seq)
+						cmd := playAudio(buffered.audio)
+						cmdMu.Lock()
+						currentCmd = cmd
+						cmdMu.Unlock()
+						cmd.Wait()
+						cmdMu.Lock()
+						currentCmd = nil
+						cmdMu.Unlock()
+						delete(buffer, nextExpected)
+						nextExpected++
+					} else {
+						break
+					}
+				}
+			} else {
+				// 提前到的，缓存起来
+				if len(buffer) >= playBufferMax {
+					log.Printf("序号=%d 到达，但缓冲已满(%d)，拒绝", job.seq, playBufferMax)
+					continue
+				}
+				log.Printf("序号=%d 提前到达，缓冲中 (期待=%d, 缓冲=%d)", job.seq, nextExpected, len(buffer)+1)
+				buffer[job.seq] = job
+			}
 		}
 	}
 }
 
-func handleConnection(conn net.Conn, cfg Config, queue chan<- playJob, ttsSem chan struct{}) {
+// playAudio 返回 afplay 命令对象，由调用方控制 Wait
+func playAudio(data []byte) *exec.Cmd {
+	tmpDir := os.TempDir()
+	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("ttsd-%d.mp3", time.Now().UnixNano()))
+	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
+		log.Printf("写入临时文件失败: %v", err)
+		return &exec.Cmd{}
+	}
+	 cmd := exec.Command("/usr/bin/afplay", tmpFile)
+	 cmd.Start()
+	 log.Printf("播放开始: %s", filepath.Base(tmpFile))
+	 go func() {
+		cmd.Wait()
+		os.Remove(tmpFile)
+	}()
+	return cmd
+}
+
+// 播放并失败重试一次
+
+func handleConnection(conn net.Conn, queue chan<- playJob, interruptCh chan<- struct{}) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("连接处理崩溃: %v", r)
 		}
 	}()
 	defer conn.Close()
+
+	cfg := loadConfig()
 
 	var sb strings.Builder
 	scanner := bufio.NewScanner(conn)
@@ -392,28 +479,44 @@ func handleConnection(conn net.Conn, cfg Config, queue chan<- playJob, ttsSem ch
 
 	log.Printf("TTS: %s", cleaned)
 
-	ttsSem <- struct{}{}
-	audio, err := synthesizeWithRetry(cfg, cleaned, voice)
-	<-ttsSem
+	// 打断当前播放和 TTS 合成
+	select {
+	case interruptCh <- struct{}{}:
+		log.Printf("打断信号已发送")
+	default:
+	}
+
+	// 取消旧的 TTS 上下文
+	ttsCtxMu.Lock()
+	if ttsCancel != nil {
+		ttsCancel()
+		log.Printf("TTS 旧请求已取消")
+	}
+	ttsCtx, ttsCancel = context.WithCancel(context.Background())
+	ttsCtxMu.Unlock()
+
+	audio, err := synthesizeWithRetry(ttsCtx, cfg, cleaned, voice)
 	if err != nil {
-		log.Printf("TTS 失败: %v", err)
+		if ttsCtx.Err() == context.Canceled {
+			log.Printf("TTS 已取消（新请求）")
+		} else {
+			log.Printf("TTS 失败: %v", err)
+		}
 		return
 	}
 
-	select {
-	case queue <- playJob{audio: audio, voiceType: voice.VoiceType}:
-		log.Printf("已入队播报，队列长度=%d", len(queue))
-	default:
-		log.Printf("播放队列已满，丢弃一条消息")
-	}
+	seq := nextSequence()
+	queue <- playJob{seq: seq, enqueuedAt: time.Now(), audio: audio, voiceType: voice.VoiceType}
+	log.Printf("已入队播报，序号=%d", seq)
 }
 
 // 解析消息中的音色前缀，返回 VoiceInfo
 func extractVoicePrefix(text string, cfg Config) (voice *VoiceInfo, content string) {
 	// 格式: {source:claude}文本
-	if strings.HasPrefix(text, "{source:") {
-		if end := strings.Index(text, "}"); end > 0 {
-			if v, ok := cfg.SourceVoices[text[8:end]]; ok {
+	const prefix = "{source:"
+	if strings.HasPrefix(text, prefix) {
+		if end := strings.Index(text, "}"); end > len(prefix) {
+			if v, ok := cfg.SourceVoices[text[len(prefix):end]]; ok {
 				voice = v
 			}
 			content = text[end+1:]
@@ -424,12 +527,16 @@ func extractVoicePrefix(text string, cfg Config) (voice *VoiceInfo, content stri
 	return
 }
 
-func synthesizeWithRetry(cfg Config, text string, voice *VoiceInfo) ([]byte, error) {
+func synthesizeWithRetry(ctx context.Context, cfg Config, text string, voice *VoiceInfo) ([]byte, error) {
 	var lastErr error
 	for i := 1; i <= ttsMaxAttempts; i++ {
-		audio, err := synthesize(cfg, text, voice)
+		audio, err := synthesize(ctx, cfg, text, voice)
 		if err == nil {
 			return audio, nil
+		}
+		// context canceled (by new request) → stop immediately
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 		lastErr = err
 		if i < ttsMaxAttempts {

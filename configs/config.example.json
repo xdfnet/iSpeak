@@ -2,16 +2,16 @@
   "apiKey": "your-api-key",
   "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
   "defaultVoice": {
-    "voice_type": "zh_female_xiaohe_uranus_bigtts",
+    "voice_type": "zh_female_mizai_uranus_bigtts",
     "resourceId": "seed-tts-2.0"
   },
   "sourceVoices": {
     "claude": {
-      "voice_type": "zh_female_wanwanxiaohe_moon_bigtts",
-      "resourceId": "seed-tts-1.0"
+      "voice_type": "zh_female_tianmeitaozi_uranus_bigtts",
+      "resourceId": "seed-tts-2.0"
     },
     "codex": {
-      "voice_type": "zh_female_tianmeitaozi_uranus_bigtts",
+      "voice_type": "zh_male_shaonianzixin_uranus_bigtts",
       "resourceId": "seed-tts-2.0"
     }
   }
