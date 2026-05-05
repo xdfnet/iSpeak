@@ -313,8 +313,10 @@ func main() {
 	log.SetFlags(log.Ltime | log.Lshortfile)
 
 	// 日志轮转：最大 10MB，保留 3 份
+	configDir := os.ExpandEnv("$HOME/.config/iSpeak")
+	os.MkdirAll(configDir, 0755)
 	log.SetOutput(&lumberjack.Logger{
-		Filename:   "/tmp/iSpeak.log",
+		Filename:   configDir + "/ispeak.log",
 		MaxSize:    10,
 		MaxBackups: 3,
 		Compress:   true,
@@ -334,7 +336,7 @@ func main() {
 		log.Fatalf("配置错误: %v", err)
 	}
 
-	socketPath := "/tmp/ispeak.sock"
+	socketPath := configDir + "/ispeak.sock"
 	// 先尝试监听，若地址被占用说明已有实例在跑
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {

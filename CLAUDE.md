@@ -21,15 +21,15 @@ make help      # 显示帮助
 
 ```
 ispeak (CLI, bash)
-  └─ nc -U /tmp/ispeak.sock
+  └─ nc -U ~/.config/iSpeak/ispeak.sock
       └─ ispeakd (Go daemon)
            ├─ TTS Context Manager (single in-flight, cancel on new request)
            └─ playbackWorker (sequential by seq#, buffered reorder)
                 └─ afplay
 ```
 
-- **Socket**: `/tmp/ispeak.sock`
-- **日志**: `/tmp/iSpeak.log` (lumberjack 轮转, 10MB/份, 保留3份)
+- **Socket**: `~/.config/iSpeak/ispeak.sock`
+- **日志**: `~/.config/iSpeak/ispeak.log` (lumberjack 轮转, 10MB/份, 保留3份)
 - **Temp**: 进程级 tempDir，退出时清理
 - **Launchd PLIST**: `~/Library/LaunchAgents/com.iSpeak.plist`
 

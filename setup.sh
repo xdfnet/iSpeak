@@ -22,7 +22,10 @@ echo ""
 # ========== 1. 安装服务 ==========
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [[ -S /tmp/ispeak.sock ]] && pgrep -x ispeakd > /dev/null 2>&1; then
+SOCK="$HOME/.config/iSpeak/ispeak.sock"
+LOG="$HOME/.config/iSpeak/ispeak.log"
+
+if [[ -S "$SOCK" ]] && pgrep -x ispeakd > /dev/null 2>&1; then
   log "服务已在运行，跳过安装"
 else
   log "安装服务..."
@@ -139,12 +142,12 @@ echo ""
 
 # 状态检查
 IS_RUNNING=false
-[[ -S /tmp/ispeak.sock ]] && IS_RUNNING=true
+[[ -S "$SOCK" ]] && IS_RUNNING=true
 
 if $IS_RUNNING; then
   log "服务状态: 运行中 ✓"
 else
-  err "服务未运行，请检查日志: /tmp/iSpeak.log"
+  err "服务未运行，请检查日志: $LOG"
   exit 1
 fi
 

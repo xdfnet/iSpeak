@@ -3,9 +3,9 @@
 set -euo pipefail
 
 VERSION="1.2.0"
-SOCK=/tmp/ispeak.sock
+SOCK="$HOME/.config/iSpeak/ispeak.sock"
 PLIST="$HOME/Library/LaunchAgents/com.iSpeak.plist"
-LOG=/tmp/iSpeak.log
+LOG="$HOME/.config/iSpeak/ispeak.log"
 
 usage() {
   cat <<EOF

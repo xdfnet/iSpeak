@@ -182,8 +182,8 @@ make help       # 显示帮助
 | 文件 | 用途 |
 |------|------|
 | `~/Library/LaunchAgents/com.iSpeak.plist` | macOS 自动启动服务 |
-| `/tmp/ispeak.sock` | 守护进程监听 Socket |
-| `/tmp/iSpeak.log` | 日志输出 |
+| `~/.config/iSpeak/ispeak.sock` | Unix Socket |
+| `~/.config/iSpeak/ispeak.log` | 日志（轮转） |
 | `~/.config/iSpeak/config.json` | 你的 API Key 和音色配置 |
 | `~/.config/iSpeak/hook-speak.sh` | Claude/Codex Hook 脚本 |
 

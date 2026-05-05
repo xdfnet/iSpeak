@@ -6,7 +6,7 @@ BIN_DIR := $(HOME)/.local/bin
 DST     := $(BIN_DIR)/ispeakd
 PLIST   := $(HOME)/Library/LaunchAgents/com.iSpeak.plist
 CONFIG  := $(HOME)/.config/iSpeak
-LOG     := /tmp/iSpeak.log
+LOG     := $(HOME)/.config/iSpeak/ispeak.log
 
 help:
 	@echo "iSpeak $(VERSION)"

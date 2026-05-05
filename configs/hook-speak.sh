@@ -6,7 +6,7 @@
 # 来源参数: claude 或 codex
 SOURCE="${1:-claude}"
 
-SOCK=/tmp/ispeak.sock
+SOCK="$HOME/.config/iSpeak/ispeak.sock"
 LOG="$HOME/.config/iSpeak/hook.log"
 
 input=$(cat)
