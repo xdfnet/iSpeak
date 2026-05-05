@@ -1,81 +1,80 @@
 #!/bin/bash
 # iSpeak 一键安装脚本
-# 运行方式: bash -c "$(curl -fsSL https://raw.githubusercontent.com/xdfnet/iSpeak/master/setup.sh)"
 set -euo pipefail
 
 VERSION="1.1.0"
+CONFIG_DIR="$HOME/.config/iSpeak"
+BIN_DIR="$HOME/.local/bin"
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-log() { echo -e "${GREEN}[iSpeak]${NC} $1"; }
-warn() { echo -e "${YELLOW}[iSpeak]${NC} $1"; }
-err() { echo -e "${RED}[iSpeak]${NC} $1" >&2; }
+log()   { echo -e "${GREEN}[iSpeak]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[iSpeak]${NC} $1"; }
+err()   { echo -e "${RED}[iSpeak]${NC} $1" >&2; }
 
 echo ""
-echo "============================================"
-echo "  iSpeak $VERSION - 一键安装"
+echo "  iSpeak $VERSION 一键安装"
 echo "============================================"
 echo ""
 
-# ========== 1. 检出 / 安装 ==========
-log "检查安装状态..."
+# ========== 1. 安装服务 ==========
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if command -v ispeak &>/dev/null && [[ -S /tmp/ispeak.sock ]]; then
-  warn "iSpeak 已安装且正在运行，跳过二进制安装"
-  INSTALLED=true
+if [[ -S /tmp/ispeak.sock ]] && pgrep -x ispeakd > /dev/null 2>&1; then
+  log "服务已在运行，跳过安装"
 else
-  INSTALLED=false
-  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  log "安装服务..."
+  mkdir -p "$BIN_DIR"
 
-  if [[ -d "$SCRIPT_DIR/.git" ]]; then
-    log "从源码目录安装..."
-    cd "$SCRIPT_DIR"
-    make install >/dev/null 2>&1 || { err "make install 失败"; exit 1; }
+  # 已有本地构建则用本地的，否则下载 Release
+  if [[ -f "$SCRIPT_DIR/build/ispeakd" ]]; then
+    install -m 0755 "$SCRIPT_DIR/build/ispeakd" "$BIN_DIR/ispeakd"
+  elif [[ -f "$BIN_DIR/ispeakd" ]]; then
+    log "二进制已存在"
   else
-    log "安装 ispeakd..."
-    BIN_DIR="$HOME/.local/bin"
-    mkdir -p "$BIN_DIR"
-    # 下载最新二进制
-    ASSETS_URL="https://github.com/xdfnet/iSpeak/releases/latest/download"
-    if command -v curl &>/dev/null; then
-      curl -fsSL "$ASSETS_URL/ispeakd" -o "$BIN_DIR/ispeakd" && chmod +x "$BIN_DIR/ispeakd"
-    fi
-    curl -fsSL "$ASSETS_URL/ispeak" -o "$BIN_DIR/ispeak" && chmod +x "$BIN_DIR/ispeak"
-    ln -sf "$BIN_DIR/ispeak" "$BIN_DIR/ispeak-claude"
-    ln -sf "$BIN_DIR/ispeak" "$BIN_DIR/ispeak-codex"
+    err "未找到 ispeakd，请先 clone 源码或从 Release 下载"
+    exit 1
   fi
+
+  install -m 0755 "$SCRIPT_DIR/scripts/ispeak" "$BIN_DIR/ispeak"
+  ln -sf "$BIN_DIR/ispeak" "$BIN_DIR/ispeak-claude"
+  ln -sf "$BIN_DIR/ispeak" "$BIN_DIR/ispeak-codex"
+
+  # 部署 plist
+  sed "s|BINARY_PATH_PLACEHOLDER|$BIN_DIR/ispeakd|" \
+    "$SCRIPT_DIR/configs/com.iSpeak.plist" > ~/Library/LaunchAgents/com.iSpeak.plist"
+
+  # 启动
+  launchctl unload ~/Library/LaunchAgents/com.iSpeak.plist 2>/dev/null || true
+  launchctl load ~/Library/LaunchAgents/com.iSpeak.plist
+  sleep 0.5
 fi
 
-# ========== 2. API Key ==========
-CONFIG_DIR="$HOME/.config/iSpeak"
+# ========== 2. 配置 API Key ==========
 CONFIG_FILE="$CONFIG_DIR/config.json"
 mkdir -p "$CONFIG_DIR"
 
+# 已有有效配置则跳过
 if [[ -f "$CONFIG_FILE" ]]; then
-  # 已有配置，尝试读取 apiKey
-  EXISTING_KEY=$(cat "$CONFIG_FILE" 2>/dev/null | sed -n 's/.*"apiKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-  if [[ -n "$EXISTING_KEY" && "$EXISTING_KEY" != "your-api-key" ]]; then
-    warn "已有 API Key，跳过输入"
-    API_KEY="$EXISTING_KEY"
+  KEY_IN_CONFIG=$(sed -n 's/.*"apiKey"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CONFIG_FILE" 2>/dev/null | head -1)
+  if [[ -n "$KEY_IN_CONFIG" && "$KEY_IN_CONFIG" != "your-api-key" ]]; then
+    log "配置文件已就绪，跳过"
+    API_KEY="$KEY_IN_CONFIG"
   fi
 fi
 
 if [[ -z "${API_KEY:-}" ]]; then
   echo ""
   echo "请输入火山引擎 API Key："
-  echo "(获取地址: https://console.volcengine.com/tts)"
+  echo "获取地址: https://console.volcengine.com/tts"
   echo -n "→ "
   read -r API_KEY
-  if [[ -z "$API_KEY" ]]; then
-    err "API Key 不能为空"
-    exit 1
-  fi
+  [[ -z "$API_KEY" ]] && { err "API Key 不能为空"; exit 1; }
 fi
 
-# ========== 3. 写入配置 ==========
-log "写入配置文件..."
+log "写入配置..."
 cat > "$CONFIG_FILE" <<EOF
 {
   "apiKey": "$API_KEY",
@@ -97,106 +96,70 @@ cat > "$CONFIG_FILE" <<EOF
 }
 EOF
 
-# ========== 4. Hook 安装 ==========
+# ========== 3. 安装 Hook 脚本 ==========
 HOOK_FILE="$CONFIG_DIR/hook-speak.sh"
 if [[ ! -f "$HOOK_FILE" ]]; then
-  if [[ -f "$(dirname "$0")/configs/hook-speak.sh" ]]; then
-    cp "$(dirname "$0")/configs/hook-speak.sh" "$HOOK_FILE"
-  else
-    # 下载 hook 脚本
-    HOOK_URL="https://raw.githubusercontent.com/xdfnet/iSpeak/master/configs/hook-speak.sh"
-    curl -fsSL "$HOOK_URL" -o "$HOOK_FILE"
-  fi
+  cp "$SCRIPT_DIR/configs/hook-speak.sh" "$HOOK_FILE"
   chmod +x "$HOOK_FILE"
 fi
 
-echo ""
-echo "============================================"
-echo "  配置 AI 助手 Hook"
-echo "============================================"
-echo ""
+# ========== 4. 配置 AI 助手 Hook ==========
+install_hook() {
+  local settings_file="$1"
+  local source="$2"
+  local hook_cmd="bash $HOME/.config/iSpeak/hook-speak.sh $source"
 
-configure_claude_code() {
-  local settings_file="$HOME/.claude/settings.json"
-  local hook_cmd="bash $HOME/.config/iSpeak/hook-speak.sh claude"
-  local hook_json='"command": "bash $HOME/.config/iSpeak/hook-speak.sh claude"'
+  [[ ! -f "$settings_file" ]] && { warn "未找到 $source 配置，跳过"; return; }
+  grep -q "hook-speak.sh" "$settings_file" 2>/dev/null && { log "$source Hook 已配置 ✓"; return; }
 
-  if [[ ! -f "$settings_file" ]]; then
-    warn "未找到 Claude Code 配置 ($settings_file)，跳过"
-    return
-  fi
-
-  log "配置 Claude Code Hook..."
-
-  # 检查是否已有 ispeak hook
-  if grep -q "hook-speak.sh" "$settings_file" 2>/dev/null; then
-    warn "Claude Code Hook 已配置，跳过"
-    return
-  fi
-
-  # 使用 jq 合并（如果有）
   if command -v jq &>/dev/null; then
     local tmp=$(mktemp)
-    jq --arg cmd "$hook_cmd" '.hooks.Stop = [.hooks.Stop[] | .hooks += [{"type": "command", "command": $cmd, "timeout": 30}]] | .hooks.Stop[0].hooks = [.hooks.Stop[0].hooks[] | select(.command | contains("hook-speak") | not)] + [{"type": "command", "command": $cmd, "timeout": 30}]' "$settings_file" > "$tmp" 2>/dev/null && mv "$tmp" "$settings_file"
-    log "Claude Code Hook 配置完成 ✓"
+    jq --arg cmd "$hook_cmd" \
+      '.hooks.Stop[0].hooks += [{"type": "command", "command": $cmd, "timeout": 30}]' \
+      "$settings_file" > "$tmp" && mv "$tmp" "$settings_file"
+    log "$source Hook 配置完成 ✓"
   else
-    warn "推荐安装 jq: brew install jq"
-    warn "或手动在 $settings_file 添加 Stop Hook："
+    warn "$source: 安装 jq 可自动配置 Hook: brew install jq"
+    warn "$source: 或手动在 $settings_file 添加 Stop Hook"
     echo "  { \"type\": \"command\", \"command\": \"$hook_cmd\", \"timeout\": 30 }"
   fi
 }
 
-configure_codex() {
-  local hooks_file="$HOME/.codex/hooks.json"
-  local hook_cmd="bash $HOME/.config/iSpeak/hook-speak.sh codex"
+echo ""
+log "配置 AI 助手 Hook..."
+install_hook "$HOME/.claude/settings.json" "Claude Code"
+install_hook "$HOME/.codex/hooks.json" "Codex"
 
-  if [[ ! -f "$hooks_file" ]]; then
-    warn "未找到 Codex 配置 ($hooks_file)，跳过"
-    return
-  fi
-
-  log "配置 Codex Hook..."
-
-  if grep -q "hook-speak.sh" "$hooks_file" 2>/dev/null; then
-    warn "Codex Hook 已配置，跳过"
-    return
-  fi
-
-  if command -v jq &>/dev/null; then
-    local tmp=$(mktemp)
-    jq --arg cmd "$hook_cmd" '.hooks.Stop = [.hooks.Stop[] | .hooks += [{"type": "command", "command": $cmd, "timeout": 30}]]' "$hooks_file" > "$tmp" 2>/dev/null && mv "$tmp" "$hooks_file"
-    log "Codex Hook 配置完成 ✓"
-  else
-    warn "推荐安装 jq: brew install jq"
-    warn "或手动在 $hooks_file 添加 Stop Hook："
-    echo "  { \"type\": \"command\", \"command\": \"$hook_cmd\", \"timeout\": 30 }"
-  fi
-}
-
-configure_claude_code
-configure_codex
-
-# ========== 5. 启动服务 ==========
-log "启动服务..."
-launchctl unload ~/Library/LaunchAgents/com.iSpeak.plist 2>/dev/null || true
-sed "s|BINARY_PATH_PLACEHOLDER|$HOME/.local/bin/ispeakd|" "$HOME/.config/iSpeak/../iSpeak/com.iSpeak.plist" 2>/dev/null || \
-sed "s|BINARY_PATH_PLACEHOLDER|$HOME/.local/bin/ispeakd|" "$(dirname "$0")/configs/com.iSpeak.plist" > ~/Library/LaunchAgents/com.iSpeak.plist 2>/dev/null || true
-launchctl load ~/Library/LaunchAgents/com.iSpeak.plist 2>/dev/null || true
-sleep 0.5
-
-# ========== 6. 自检 ==========
+# ========== 5. 自检 ==========
 echo ""
 echo "============================================"
 echo "  自检"
 echo "============================================"
 echo ""
 
-ispeak status
+# 状态检查
+IS_RUNNING=false
+[[ -S /tmp/ispeak.sock ]] && IS_RUNNING=true
+
+if $IS_RUNNING; then
+  log "服务状态: 运行中 ✓"
+else
+  err "服务未运行，请检查日志: /tmp/iSpeak.log"
+  exit 1
+fi
+
+# 测试播报（静默）
+echo "测试语音..."
+ispeak "iSpeak 安装完成" 2>/dev/null && log "语音测试: 成功 ✓" || warn "语音测试: 失败"
+
+echo ""
+log "安装完成！"
 echo ""
 
-log "一键安装完成！"
-echo ""
-echo "下一步："
-echo "  1. 重启 Claude Code / Codex 让 Hook 生效"
-echo "  2. 试试: ispeak test \"iSpeak 工作正常\""
+if ! command -v jq &>/dev/null; then
+  echo "提示: 安装 jq 可以自动配置 Hook"
+  echo "  brew install jq"
+  echo ""
+fi
+echo "请重启 Claude Code / Codex 让 Hook 生效"
 echo ""
