@@ -5,50 +5,19 @@ set -euo pipefail
 VERSION="1.4.0"
 SOCK="$HOME/.config/iSpeak/ispeak.sock"
 PLIST="$HOME/Library/LaunchAgents/com.iSpeak.plist"
-LOG="$HOME/.config/iSpeak/ispeak.log"
-
-usage() {
-  cat <<EOF
-iSpeak $VERSION
-
-用法:
-  ispeak "文本"          播报
-  ispeak status          服务状态
-  ispeak test [文本]     自检播报
-  ispeak restart         重启服务
-  ispeak logs [N]       查看日志（默认50行）
-  ispeak version         版本
-EOF
-}
-
-send_text() {
-  local text="$1"
-  [[ -z "$text" ]] && return 0
-  if printf "%s" "$text" | nc -U -w5 "$SOCK" 2>/dev/null; then
-    return 0
-  else
-    echo "ispeak: socket 不可用" >&2
-    return 1
-  fi
-}
 
 cmd_status() {
-  local ok=true
   echo "== iSpeak =="
-  local pid=$(launchctl list 2>/dev/null | grep -i iSpeak | awk '{print $1}' | head -1)
-  if [[ -n "$pid" && "$pid" != "-" ]]; then
-    echo "  进程: $pid ✓"
+  if pgrep ispeakd > /dev/null 2>&1; then
+    echo "  进程: $(pgrep ispeakd) ✓"
   else
     echo "  进程: 未运行 ✗"
-    ok=false
   fi
   if [[ -S "$SOCK" ]]; then
     echo "  Socket: ✓"
   else
     echo "  Socket: ✗"
-    ok=false
   fi
-  $ok && return 0 || return 1
 }
 
 cmd_restart() {
@@ -59,44 +28,23 @@ cmd_restart() {
     echo "ispeak: 已重启"
   else
     echo "ispeak: 重启失败" >&2
-    return 1
+    exit 1
   fi
 }
-
-cmd_test() {
-  send_text "$(build_msg "${1:-iSpeak 测试通过}")"
-}
-
-cmd_logs() {
-  tail -n "${1:-50}" "$LOG"
-}
-
-get_default_source() {
-  case "$(basename "$0")" in
-    ispeak-claude) echo "claude" ;;
-    ispeak-codex) echo "codex" ;;
-    *) echo "" ;;
-  esac
-}
-
-build_msg() {
-  local src="$(get_default_source)"
-  if [[ -n "$src" ]]; then
-    echo "{source:${src}}$1"
-  else
-    echo "$1"
-  fi
-}
-
-# ---------- 主入口 ----------
-SOURCE_FLAG=""
 
 case "${1:-}" in
-  status)  cmd_status ;;
-  test)    shift; cmd_test "$*" ;;
+  status) cmd_status ;;
   restart) cmd_restart ;;
-  logs)    shift; cmd_logs "${1:-50}" ;;
-  version|-v|--version) echo "iSpeak $VERSION" ;;
-  -h|--help|"") usage; exit 1 ;;
-  *)        send_text "$(build_msg "$*")" ;;
+  -v|--version) echo "iSpeak $VERSION" ;;
+  "")
+    echo "iSpeak $VERSION"
+    echo ""
+    echo "用法:"
+    echo "  ispeak \"文本\"     播报"
+    echo "  ispeak status      服务状态"
+    echo "  ispeak restart     重启服务"
+    ;;
+  *)
+    printf "%s" "$*" | nc -U -w5 "$SOCK" 2>/dev/null || echo "ispeak: socket 不可用" >&2
+    ;;
 esac
