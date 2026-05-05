@@ -1,6 +1,6 @@
 # iSpeak
 
-![Version](https://img.shields.io/badge/version-1.4.0-blue)
+![Version](https://img.shields.io/badge/version-1.5.0-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.26-blue)](https://golang.org/dl/)
 ![Platform](https://img.shields.io/badge/platform-macOS-green)
@@ -26,8 +26,8 @@ ispeak-codex "构建完成，耗时 12 秒"
 
 | 问题 | 方案 |
 |------|------|
-| AI 生成多条回复，TTS 账单飞涨 | 新消息取消正在进行的 TTS，只为最终那条付费 |
-| 回复快慢不一，音频播报乱序 | 全局序号保证严格按顺序播放 |
+| AI 生成多条回复，TTS 账单飞涨 | 新消息只保留最新待合成任务，避免无效合成 |
+| 回复快慢不一，音频播报乱序 | 单合成 + 单播放 worker，FIFO 顺序稳定 |
 | 修改配置要重启服务 | 热更新：编辑 `config.json` 立即生效 |
 | 默认音色太无聊 | 来源专属音色，Claude 和 Codex 声音不同 |
 
@@ -58,27 +58,23 @@ ispeak test "iSpeak 准备好了"
 │   通过 Unix Socket 接收文本                          │
 │         │                                            │
 │         ▼                                           │
-│   任务管理器                                        │
-│   （追踪每个 TTS 任务的状态）                         │
+│   任务引擎                                           │
+│   （pending_synth → synthesizing                     │
+│    → pending_play → playing → delete）               │
 │         │                                            │
 │         ▼                                           │
-│   TTS 上下文管理器                                   │
-│   （仅取消 pending 状态，正在合成的不打断）           │
+│   双 Worker 流水线                                   │
+│   （单合成 worker + 单播放 worker）                  │
 │         │                                            │
 │         ▼                                           │
-│   播放队列                                          │
-│   （按序号排序播放，乱序音频先缓存等待）              │
-│         │                                            │
-│         ▼                                           │
-│   afplay → 你的扬声器或耳机                         │
+│   常驻播放器子进程                                   │
+│   （主进程发路径命令，子进程播完回执）                │
 └─────────────────────────────────────────────────────┘
 ```
 
 **任务状态流转：**
 ```
-pending → synthesizing → completed  (入队播放)
-                      → failed     (合成失败)
-pending → canceled     (被新消息取消，不入队)
+pending_synth → synthesizing → pending_play → playing → delete
 ```
 
 ## 全部命令

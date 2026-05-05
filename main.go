@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -25,125 +26,464 @@ import (
 )
 
 const (
-	playQueueSize  = 128
-	playBufferMax  = 64              // 缓冲队列上限
-	playSeqTimeout = 60 * time.Second // seq 等待超时
-	ttsMaxAttempts  = 2
-	ttsRetryBackoff = 400 * time.Millisecond
+	ttsMaxAttempts   = 2
+	ttsRetryBackoff  = 400 * time.Millisecond
+	playMaxAttempts  = 2
+	playRetryBackoff = 200 * time.Millisecond
 )
 
-// 全局 TTS 上下文管理（只有一个 TTS 在跑，新请求取消旧请求）
+var configDir = os.ExpandEnv("$HOME/.config/iSpeak")
+
 var (
-	ttsCtxMu   sync.Mutex
-	ttsCtx     context.Context
-	ttsCancel  context.CancelFunc
+	configCacheMu      sync.Mutex
+	configCachePath    string
+	configCacheModTime time.Time
+	configCache        Config
+	configCacheValid   bool
 )
 
-// 全局序号分配器
-var (
-	seqMu   sync.Mutex
-	nextSeq uint64 = 0
-)
-
-// 任务状态
-type TaskStatus int
-
-const (
-	TaskStatusPending      TaskStatus = iota // 等待合成
-	TaskStatusSynthesizing                  // 合成中
-	TaskStatusCompleted                     // 合成完成，已入队
-	TaskStatusFailed                        // 合成失败
-	TaskStatusCanceled                       // 被新请求取消
-)
-
-// 单个 TTS 任务
-type Task struct {
-	ID      uint64
-	Text    string
-	Status  TaskStatus
-	Seq     uint64  // 播放序号（完成后填充）
-	Audio   []byte  // 音频数据（完成后填充）
-	Cancel  func()  // 取消函数
-	Canceled bool   // 是否已被取消
-}
-
-// 全局任务管理
-var (
-	taskMu         sync.Mutex
-	tasks          = make(map[uint64]*Task) // taskID → Task
-	currentTaskID  uint64 = 0
-	taskIDMu       sync.Mutex              // 专门给 nextTaskID 用的锁
-	activeTaskID   uint64 = 0               // 当前激活的任务ID
-)
-
-func nextTaskID() uint64 {
-	taskIDMu.Lock()
-	defer taskIDMu.Unlock()
-	currentTaskID++
-	return currentTaskID
-}
-
-func createTask(text string) *Task {
-	taskMu.Lock()
-	defer taskMu.Unlock()
-	id := nextTaskID()
-	task := &Task{ID: id, Text: text, Status: TaskStatusPending}
-	tasks[id] = task
-	log.Printf("任务创建: id=%d text=%s", id, text)
-	return task
-}
-
-func getTask(id uint64) *Task {
-	taskMu.Lock()
-	defer taskMu.Unlock()
-	return tasks[id]
-}
-
-func setActiveTask(id uint64) {
-	taskMu.Lock()
-	defer taskMu.Unlock()
-	activeTaskID = id
-}
-
-func cancelTask(id uint64) {
-	taskMu.Lock()
-	defer taskMu.Unlock()
-	if task, ok := tasks[id]; ok && task.Status == TaskStatusPending {
-		task.Canceled = true
-		task.Status = TaskStatusCanceled
-		log.Printf("任务取消: id=%d", id)
-	}
-}
+var ttsHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 // 进程级 temp 目录（进程退出时清理）
 var tempDir string
 
-func nextSequence() uint64 {
-	seqMu.Lock()
-	defer seqMu.Unlock()
-	nextSeq++
-	return nextSeq
+type AudioPlayer interface {
+	Play(audio []byte) error
+	Close() error
+}
+
+type playerCommand struct {
+	Path string `json:"path"`
+}
+
+type playerResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+type commandPlayer struct {
+	mu     sync.Mutex
+	cmd    *exec.Cmd
+	stdin  *bufio.Writer
+	input  io.WriteCloser
+	stdout io.ReadCloser
+	dec    *json.Decoder
+}
+
+func newCommandPlayer() (*commandPlayer, error) {
+	p := &commandPlayer{}
+	if err := p.startLocked(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (p *commandPlayer) startLocked() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(exe, "--player-worker")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		stdin.Close()
+		return err
+	}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return err
+	}
+	p.cmd = cmd
+	p.input = stdin
+	p.stdin = bufio.NewWriter(stdin)
+	p.stdout = stdout
+	p.dec = json.NewDecoder(stdout)
+	go func(c *exec.Cmd) {
+		_ = c.Wait()
+	}(cmd)
+	return nil
+}
+
+func (p *commandPlayer) restartLocked() error {
+	if p.input != nil {
+		_ = p.input.Close()
+	}
+	if p.cmd != nil && p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
+	}
+	if p.stdout != nil {
+		_ = p.stdout.Close()
+	}
+	p.cmd = nil
+	p.input = nil
+	p.stdin = nil
+	p.stdout = nil
+	p.dec = nil
+	return p.startLocked()
+}
+
+func (p *commandPlayer) Play(audio []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.stdin == nil || p.dec == nil {
+		if err := p.startLocked(); err != nil {
+			return err
+		}
+	}
+
+	tmpFile := filepath.Join(tempDir, fmt.Sprintf("ttsd-%d.mp3", time.Now().UnixNano()))
+	if err := os.WriteFile(tmpFile, audio, 0644); err != nil {
+		return fmt.Errorf("写入临时文件失败: %w", err)
+	}
+	defer os.Remove(tmpFile)
+
+	playOnce := func() error {
+		cmdMsg := playerCommand{Path: tmpFile}
+		if err := p.decodedWrite(cmdMsg); err != nil {
+			return err
+		}
+		resp, err := p.decodedRead()
+		if err != nil {
+			return err
+		}
+		if !resp.OK {
+			if resp.Error == "" {
+				return errors.New("player worker failed")
+			}
+			return errors.New(resp.Error)
+		}
+		return nil
+	}
+
+	if err := playOnce(); err == nil {
+		return nil
+	}
+	if err := p.restartLocked(); err != nil {
+		return err
+	}
+	return playOnce()
+}
+
+func (p *commandPlayer) decodedWrite(cmdMsg playerCommand) error {
+	b, err := json.Marshal(cmdMsg)
+	if err != nil {
+		return err
+	}
+	if _, err := p.stdin.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	return p.stdin.Flush()
+}
+
+func (p *commandPlayer) decodedRead() (playerResponse, error) {
+	var resp playerResponse
+	if err := p.dec.Decode(&resp); err != nil {
+		return playerResponse{}, err
+	}
+	return resp, nil
+}
+
+func (p *commandPlayer) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.input != nil {
+		_ = p.input.Close()
+		p.input = nil
+	}
+	if p.stdout != nil {
+		_ = p.stdout.Close()
+		p.stdout = nil
+	}
+	if p.stdin != nil {
+		p.stdin = nil
+	}
+	p.dec = nil
+	if p.cmd != nil && p.cmd.Process != nil {
+		_ = p.cmd.Process.Kill()
+		p.cmd = nil
+	}
+	return nil
+}
+
+// 任务状态
+// 生命周期：pending_synth -> synthesizing -> pending_play -> playing -> delete
+type TaskStatus int
+
+const (
+	TaskStatusPendingSynth TaskStatus = iota
+	TaskStatusSynthesizing
+	TaskStatusPendingPlay
+	TaskStatusPlaying
+)
+
+// 单个 TTS 任务
+type Task struct {
+	ID     uint64
+	Text   string
+	Status TaskStatus
+	Voice  VoiceInfo
+	Cfg    Config
+	Audio  []byte
+}
+
+// 任务引擎：任务仓库 + 单合成 worker + 单播放 worker
+type TaskEngine struct {
+	mu sync.Mutex
+
+	nextID       uint64
+	tasks        map[uint64]*Task
+	pendingSynth []uint64
+	pendingPlay  []uint64
+
+	synthWake chan struct{}
+	playWake  chan struct{}
+
+	synthesizeFn func(ctx context.Context, cfg Config, text string, voice *VoiceInfo) ([]byte, error)
+	playFn       func(audio []byte) error
+}
+
+func NewTaskEngine() *TaskEngine {
+	return &TaskEngine{
+		tasks:        make(map[uint64]*Task),
+		synthWake:    make(chan struct{}, 1),
+		playWake:     make(chan struct{}, 1),
+		synthesizeFn: synthesize,
+		playFn:       playAudio,
+	}
+}
+
+func (e *TaskEngine) Start() {
+	go e.synthWorker()
+	go e.playWorker()
+}
+
+func (e *TaskEngine) Submit(text string, voice VoiceInfo, cfg Config) uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// 新任务进来先删所有未开始合成任务
+	for _, id := range e.pendingSynth {
+		delete(e.tasks, id)
+		log.Printf("删除待合成任务: id=%d", id)
+	}
+	e.pendingSynth = e.pendingSynth[:0]
+
+	e.nextID++
+	task := &Task{
+		ID:     e.nextID,
+		Text:   text,
+		Status: TaskStatusPendingSynth,
+		Voice:  voice,
+		Cfg:    cfg,
+	}
+	e.tasks[task.ID] = task
+	e.pendingSynth = append(e.pendingSynth, task.ID)
+	log.Printf("任务创建: id=%d text=%s", task.ID, text)
+
+	notify(e.synthWake)
+	return task.ID
+}
+
+func (e *TaskEngine) synthWorker() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("合成 worker 崩溃: %v", r)
+		}
+	}()
+
+	for {
+		id := e.claimPendingSynth()
+		if id == 0 {
+			<-e.synthWake
+			continue
+		}
+
+		task, ok := e.getTask(id)
+		if !ok {
+			continue
+		}
+
+		var (
+			audio   []byte
+			lastErr error
+		)
+		for i := 1; i <= ttsMaxAttempts; i++ {
+			audio, lastErr = e.synthesizeFn(context.Background(), task.Cfg, task.Text, &task.Voice)
+			if lastErr == nil {
+				break
+			}
+			if i < ttsMaxAttempts {
+				time.Sleep(ttsRetryBackoff)
+			}
+		}
+
+		if lastErr != nil {
+			log.Printf("TTS 失败并删除任务: id=%d err=%v", id, lastErr)
+			e.deleteTask(id)
+			continue
+		}
+
+		e.markPendingPlay(id, audio)
+		notify(e.playWake)
+	}
+}
+
+func (e *TaskEngine) playWorker() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("播放 worker 崩溃: %v", r)
+		}
+	}()
+
+	for {
+		id := e.claimPendingPlay()
+		if id == 0 {
+			<-e.playWake
+			continue
+		}
+
+		task, ok := e.getTask(id)
+		if !ok {
+			continue
+		}
+
+		var lastErr error
+		for i := 1; i <= playMaxAttempts; i++ {
+			lastErr = e.playFn(task.Audio)
+			if lastErr == nil {
+				break
+			}
+			if i < playMaxAttempts {
+				time.Sleep(playRetryBackoff)
+			}
+		}
+
+		if lastErr != nil {
+			log.Printf("播放失败并删除任务: id=%d err=%v", id, lastErr)
+		} else {
+			log.Printf("播放完成并删除任务: id=%d", id)
+		}
+		e.deleteTask(id)
+	}
+}
+
+func (e *TaskEngine) claimPendingSynth() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for len(e.pendingSynth) > 0 {
+		id := e.pendingSynth[0]
+		e.pendingSynth = e.pendingSynth[1:]
+		task, ok := e.tasks[id]
+		if !ok {
+			continue
+		}
+		if task.Status != TaskStatusPendingSynth {
+			continue
+		}
+		task.Status = TaskStatusSynthesizing
+		return id
+	}
+	return 0
+}
+
+func (e *TaskEngine) claimPendingPlay() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for len(e.pendingPlay) > 0 {
+		id := e.pendingPlay[0]
+		e.pendingPlay = e.pendingPlay[1:]
+		task, ok := e.tasks[id]
+		if !ok {
+			continue
+		}
+		if task.Status != TaskStatusPendingPlay {
+			continue
+		}
+		task.Status = TaskStatusPlaying
+		return id
+	}
+	return 0
+}
+
+func (e *TaskEngine) markPendingPlay(id uint64, audio []byte) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	task, ok := e.tasks[id]
+	if !ok {
+		return
+	}
+	task.Audio = audio
+	task.Status = TaskStatusPendingPlay
+	e.pendingPlay = append(e.pendingPlay, id)
+	log.Printf("合成完成转待播放: id=%d", id)
+}
+
+func (e *TaskEngine) getTask(id uint64) (*Task, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	task, ok := e.tasks[id]
+	if !ok {
+		return nil, false
+	}
+	clone := *task
+	return &clone, true
+}
+
+func (e *TaskEngine) deleteTask(id uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.tasks, id)
+}
+
+func notify(ch chan struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
 }
 
 // 音色信息
 type VoiceInfo struct {
-	VoiceType string `json:"voice_type"`
+	VoiceType  string `json:"voice_type"`
 	ResourceID string `json:"resourceId"`
 }
 
 // TTS 配置
 type Config struct {
-	APIKey       string                  `json:"apiKey"`
-	Endpoint     string                  `json:"endpoint"`
-	DefaultVoice *VoiceInfo              `json:"defaultVoice"`     // 默认音色
-	SourceVoices map[string]*VoiceInfo   `json:"sourceVoices"`     // 来源 → 音色 映射
+	APIKey       string                `json:"apiKey"`
+	Endpoint     string                `json:"endpoint"`
+	DefaultVoice *VoiceInfo            `json:"defaultVoice"` // 默认音色
+	SourceVoices map[string]*VoiceInfo `json:"sourceVoices"` // 来源 → 音色 映射
 }
 
 func loadConfig() Config {
 	configPaths := []string{
-		os.ExpandEnv("$HOME/.config/iSpeak/config.json"),
+		configDir + "/config.json",
 	}
 	for _, p := range configPaths {
+		st, statErr := os.Stat(p)
+		if statErr == nil {
+			configCacheMu.Lock()
+			if configCacheValid && configCachePath == p && st.ModTime().Equal(configCacheModTime) {
+				cached := configCache
+				configCacheMu.Unlock()
+				return cached
+			}
+			configCacheMu.Unlock()
+		}
+
 		data, err := os.ReadFile(p)
 		if err != nil {
 			continue
@@ -156,6 +496,14 @@ func loadConfig() Config {
 			}
 			for source, v := range cfg.SourceVoices {
 				log.Printf("来源 %s → %s (%s)", source, v.VoiceType, v.ResourceID)
+			}
+			if st, stErr := os.Stat(p); stErr == nil {
+				configCacheMu.Lock()
+				configCachePath = p
+				configCacheModTime = st.ModTime()
+				configCache = cfg
+				configCacheValid = true
+				configCacheMu.Unlock()
 			}
 			return cfg
 		}
@@ -187,22 +535,14 @@ type ttsUser struct {
 }
 
 type ttsReqParams struct {
-	Text        string        `json:"text"`
-	Speaker     string        `json:"speaker"`
+	Text        string         `json:"text"`
+	Speaker     string         `json:"speaker"`
 	AudioParams ttsAudioParams `json:"audio_params"`
 }
 
 type ttsAudioParams struct {
 	Format     string `json:"format"`
 	SampleRate int    `json:"sample_rate"`
-}
-
-type playJob struct {
-	taskID    uint64
-	seq       uint64
-	enqueuedAt time.Time
-	audio     []byte
-	voiceType string // 音色类型，用于日志
 }
 
 // 调用字节跳动 TTS API，返回 MP3 音频数据
@@ -213,7 +553,7 @@ func synthesize(ctx context.Context, cfg Config, text string, voice *VoiceInfo) 
 	log.Printf("音色: %s (resourceId: %s)", speaker, resourceID)
 
 	reqBody := ttsRequest{
-		User:      ttsUser{UID: "ttsd-" + time.Now().Format("150405")},
+		User:      ttsUser{UID: fmt.Sprintf("ttsd-%d", time.Now().UnixNano())},
 		Namespace: "BidirectionalTTS",
 		ReqParams: ttsReqParams{
 			Text:    text,
@@ -239,16 +579,16 @@ func synthesize(ctx context.Context, cfg Config, text string, voice *VoiceInfo) 
 	req.Header.Set("X-Api-Resource-Id", resourceID)
 	req.Header.Set("X-Api-Request-Id", fmt.Sprintf("ttsd-%d", time.Now().UnixNano()))
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := ttsHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http request: %w", err)
 	}
-	defer resp.Body.Close()
-
 	if resp.StatusCode != 200 {
+		io.Copy(io.Discard, resp.Body) // 消费 body 以释放连接
+		resp.Body.Close()
 		return nil, fmt.Errorf("http status %d", resp.StatusCode)
 	}
+	defer resp.Body.Close()
 
 	return parseSSE(resp.Body)
 }
@@ -324,6 +664,7 @@ func processEvent(payload string, chunks *[][]byte) error {
 
 	var event map[string]any
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		log.Printf("SSE 数据解析失败: %v", err)
 		return nil
 	}
 
@@ -353,7 +694,6 @@ func extractAudioBase64(event map[string]any) string {
 	return ""
 }
 
-// 用 afplay 播放 MP3
 // 过滤格式符号，保留自然朗读文本
 func cleanText(text string) string {
 	var lines []string
@@ -363,6 +703,10 @@ func cleanText(text string) string {
 			continue
 		}
 		if strings.HasPrefix(line, "---") && strings.Count(line, "-") > 3 {
+			continue
+		}
+		// 过滤纯表格分隔行（|---|---|、:---|:---| 等）
+		if strings.Trim(line, "|-: ") == "" {
 			continue
 		}
 		cleaned := strings.NewReplacer(
@@ -381,10 +725,14 @@ func cleanText(text string) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--player-worker" {
+		runPlayerWorker()
+		return
+	}
+
 	log.SetFlags(log.Ltime | log.Lshortfile)
 
 	// 日志轮转：最大 10MB，保留 3 份
-	configDir := os.ExpandEnv("$HOME/.config/iSpeak")
 	os.MkdirAll(configDir, 0755)
 	log.SetOutput(&lumberjack.Logger{
 		Filename:   configDir + "/ispeak.log",
@@ -428,15 +776,20 @@ func main() {
 	go func() {
 		<-sigCh
 		listener.Close()
-		os.Remove(socketPath)
-		os.Exit(0)
 	}()
 
-	log.Printf("iSpeak 已启动，监听 %s", socketPath)
-	playQueue := make(chan playJob, playQueueSize)
-	interruptCh := make(chan struct{}, 1) // 新请求打断信号
-	go playbackWorker(playQueue, interruptCh)
+	engine := NewTaskEngine()
+	player, err := newCommandPlayer()
+	if err != nil {
+		log.Fatalf("播放器子进程启动失败: %v", err)
+	} else {
+		log.Printf("播放器模式: 常驻子进程")
+		engine.playFn = player.Play
+		defer player.Close()
+	}
+	engine.Start()
 
+	log.Printf("iSpeak 已启动，监听 %s", socketPath)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -445,7 +798,7 @@ func main() {
 			}
 			continue
 		}
-		go handleConnection(conn, playQueue, interruptCh)
+		go handleConnection(conn, engine)
 	}
 }
 
@@ -476,98 +829,65 @@ func validateConfig(cfg Config) error {
 	return nil
 }
 
-func playbackWorker(queue <-chan playJob, interruptCh <-chan struct{}) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("播放 worker 崩溃: %v", r)
+func runPlayerWorker() {
+	scanner := bufio.NewScanner(os.Stdin)
+	enc := json.NewEncoder(os.Stdout)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
 		}
-	}()
 
-	var (
-		nextExpected uint64              = 1
-		buffer      map[uint64]playJob  = make(map[uint64]playJob)
-		currentCmd  *exec.Cmd           // 当前播放的 afplay 进程
-		cmdMu       sync.Mutex           // 保护 currentCmd
-	)
-
-	for {
-		select {
-		case <-interruptCh:
-			cmdMu.Lock()
-			if currentCmd != nil && currentCmd.Process != nil {
-			 log.Printf("打断当前播放")
-			 currentCmd.Process.Kill()
-			}
-			cmdMu.Unlock()
-		case job := <-queue:
-			if job.seq == nextExpected {
-				// 正好是下一个该播放的，直接播放
-				log.Printf("播放序号=%d", job.seq)
-				cmd := playAudio(job.audio)
-				cmdMu.Lock()
-				currentCmd = cmd
-				cmdMu.Unlock()
-			 cmd.Wait()
-			 cmdMu.Lock()
-			 currentCmd = nil
-			 cmdMu.Unlock()
-				nextExpected++
-				// 吐出缓冲中积压的 job
-				for {
-					if buffered, ok := buffer[nextExpected]; ok {
-						// 检查超时
-						if time.Since(buffered.enqueuedAt) > playSeqTimeout {
-							log.Printf("序号=%d 等待超时，跳过", nextExpected)
-							delete(buffer, nextExpected)
-							nextExpected++
-							continue
-						}
-						log.Printf("播放序号=%d (缓冲)", buffered.seq)
-						cmd := playAudio(buffered.audio)
-						cmdMu.Lock()
-						currentCmd = cmd
-						cmdMu.Unlock()
-						cmd.Wait()
-						cmdMu.Lock()
-						currentCmd = nil
-						cmdMu.Unlock()
-						delete(buffer, nextExpected)
-						nextExpected++
-					} else {
-						break
-					}
-				}
-			} else {
-				// 提前到的，缓存起来
-				if len(buffer) >= playBufferMax {
-					log.Printf("序号=%d 到达，但缓冲已满(%d)，拒绝", job.seq, playBufferMax)
-					continue
-				}
-				log.Printf("序号=%d 提前到达，缓冲中 (期待=%d, 缓冲=%d)", job.seq, nextExpected, len(buffer)+1)
-				buffer[job.seq] = job
-			}
+		var cmdMsg playerCommand
+		if err := json.Unmarshal([]byte(line), &cmdMsg); err != nil {
+			_ = enc.Encode(playerResponse{OK: false, Error: err.Error()})
+			continue
 		}
+		if cmdMsg.Path == "" {
+			_ = enc.Encode(playerResponse{OK: false, Error: "empty path"})
+			continue
+		}
+
+		if err := playFileWithBestBackend(cmdMsg.Path); err != nil {
+			_ = enc.Encode(playerResponse{OK: false, Error: err.Error()})
+			continue
+		}
+		_ = enc.Encode(playerResponse{OK: true})
 	}
 }
 
-// playAudio 返回 afplay 命令对象，由调用方控制 Wait
-func playAudio(data []byte) *exec.Cmd {
+func playFileWithBestBackend(path string) error {
+	if _, err := exec.LookPath("ffplay"); err == nil {
+		cmd := exec.Command("ffplay", "-nodisp", "-autoexit", "-loglevel", "error", path)
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("ffplay failed: %w", err)
+		}
+		return nil
+	}
+
+	cmd := exec.Command("/usr/bin/afplay", path)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("afplay failed: %w", err)
+	}
+	return nil
+}
+
+func playAudio(data []byte) error {
 	tmpFile := filepath.Join(tempDir, fmt.Sprintf("ttsd-%d.mp3", time.Now().UnixNano()))
 	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
-		log.Printf("写入临时文件失败: %v", err)
-		return &exec.Cmd{}
+		return fmt.Errorf("写入临时文件失败: %w", err)
 	}
+	defer os.Remove(tmpFile)
+
 	cmd := exec.Command("/usr/bin/afplay", tmpFile)
-	cmd.Start()
 	log.Printf("播放开始: %s", filepath.Base(tmpFile))
-	go func() {
-		cmd.Wait()
-		os.Remove(tmpFile)
-	}()
-	return cmd
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("播放失败: %w", err)
+	}
+	return nil
 }
 
-func handleConnection(conn net.Conn, queue chan<- playJob, interruptCh chan<- struct{}) {
+func handleConnection(conn net.Conn, engine *TaskEngine) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("连接处理崩溃: %v", r)
@@ -579,7 +899,7 @@ func handleConnection(conn net.Conn, queue chan<- playJob, interruptCh chan<- st
 
 	var sb strings.Builder
 	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(make([]byte, 64*1024), 64*1024)
+	scanner.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
 	for scanner.Scan() {
 		sb.WriteString(scanner.Text())
 	}
@@ -589,7 +909,6 @@ func handleConnection(conn net.Conn, queue chan<- playJob, interruptCh chan<- st
 		return
 	}
 
-	// 解析音色前缀 {voice:桃子}文本 或 {source:claude}文本
 	voice, content := extractVoicePrefix(text, cfg)
 	if voice == nil {
 		voice = cfg.DefaultVoice
@@ -605,55 +924,7 @@ func handleConnection(conn net.Conn, queue chan<- playJob, interruptCh chan<- st
 	}
 
 	log.Printf("TTS: %s", cleaned)
-
-	// 打断当前播放
-	select {
-	case interruptCh <- struct{}{}:
-		log.Printf("打断信号已发送")
-	default:
-	}
-
-	// 取消旧的 pending 任务（正在合成的不管）
-	oldActiveID := activeTaskID
-	if oldActiveID > 0 {
-		cancelTask(oldActiveID)
-	}
-
-	// 创建新任务
-	task := createTask(cleaned)
-	task.Status = TaskStatusSynthesizing
-	setActiveTask(task.ID)
-
-	// 创建新的 TTS context
-	ttsCtxMu.Lock()
-	if ttsCancel != nil {
-		ttsCancel()
-	}
-	ttsCtx, ttsCancel = context.WithCancel(context.Background())
-	ttsCtxMu.Unlock()
-
-	// 合成
-	audio, err := synthesizeWithRetry(ttsCtx, cfg, cleaned, voice)
-	task.Status = TaskStatusFailed
-
-	if err != nil {
-		log.Printf("TTS 失败: id=%d err=%v", task.ID, err)
-		return
-	}
-
-	// 合成完成后检查是否被取消
-	if task.Canceled {
-		log.Printf("任务已取消，跳过入队: id=%d", task.ID)
-		return
-	}
-
-	// 入队
-	task.Status = TaskStatusCompleted
-	seq := nextSequence()
-	task.Seq = seq
-	task.Audio = audio
-	queue <- playJob{taskID: task.ID, seq: seq, enqueuedAt: time.Now(), audio: audio, voiceType: voice.VoiceType}
-	log.Printf("已入队播报: id=%d seq=%d", task.ID, seq)
+	engine.Submit(cleaned, *voice, cfg)
 }
 
 // 解析消息中的音色前缀，返回 VoiceInfo
@@ -671,23 +942,4 @@ func extractVoicePrefix(text string, cfg Config) (voice *VoiceInfo, content stri
 	}
 	content = text
 	return
-}
-
-func synthesizeWithRetry(ctx context.Context, cfg Config, text string, voice *VoiceInfo) ([]byte, error) {
-	var lastErr error
-	for i := 1; i <= ttsMaxAttempts; i++ {
-		audio, err := synthesize(ctx, cfg, text, voice)
-		if err == nil {
-			return audio, nil
-		}
-		// context canceled (by new request) → stop immediately
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		lastErr = err
-		if i < ttsMaxAttempts {
-			time.Sleep(ttsRetryBackoff)
-		}
-	}
-	return nil, lastErr
 }
