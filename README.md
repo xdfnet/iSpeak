@@ -1,70 +1,81 @@
 # iSpeak
 
-小而稳的本地 TTS 播报服务：接收文本，转换语音并顺序播放。
+小而美的本地 TTS 播报服务。接收文本，通过字节跳动火山引擎 TTS 生成音频，按序号顺序播放。
+
+**核心特性**：新消息打断旧播放 + TTS 合成可取消，不为旧消息付冤枉钱。
 
 ## 组成
 
-- `~/.local/bin/ispeakd`：守护进程（监听 `/tmp/ispeak.sock`）
-- `~/.local/bin/ispeak`：命令入口
-- `~/.local/bin/ispeak-claude`：Claude Code 用（湾湾音色）
-- `~/.local/bin/ispeak-codex`：Codex 用（桃子音色）
+```
+~/.local/bin/ispeakd      守护进程（监听 Unix Socket）
+~/.local/bin/ispeak       命令行入口
+~/.local/bin/ispeak-claude  Claude Code 专用音色
+~/.local/bin/ispeak-codex   Codex 专用音色
+```
 
-## 快速安装
+## 快速开始
 
 ```bash
-cd /path/to/iSpeak
+# 安装
+git clone https://github.com/yourname/iSpeak.git
+cd iSpeak
 make install
+
+# 自检
 ispeak status
-ispeak test "飞哥你好"
+ispeak test "你好世界"
 ```
 
 ## 常用命令
 
 ```bash
-ispeak "任务完成"          # 日常播报（默认音色）
-ispeak test               # 自检播报（默认测试文案）
+ispeak "任务完成"          # 播报文本（默认音色）
+ispeak test               # 自检播报
 ispeak test "飞哥你好"     # 自检播报（自定义文案）
-ispeak status              # 查看服务/socket/音色配置
-ispeak restart             # 重启服务
-ispeak recover             # 重启 + 状态检查 + 测试播报
-ispeak logs 80             # 查看最近 80 行日志
-ispeak tail                # 实时日志
+ispeak status             # 查看服务状态
+ispeak restart            # 重启服务
+ispeak recover            # 重启 + 状态检查 + 测试播报
+ispeak logs 80            # 查看最近 80 行日志
+ispeak tail               # 实时日志
 ```
 
 ## 音色指定
 
 ```bash
-ispeak "文本"           # 默认音色（小何）
-ispeak-claude "文本"    # 湾湾音色（Claude Code）
-ispeak-codex "文本"     # 桃子音色（Codex）
+ispeak "文本"              # 默认音色
+ispeak-claude "文本"      # Claude 专用音色
+ispeak-codex "文本"       # Codex 专用音色
 ```
 
 ## 配置
 
-配置文件路径：`~/.config/iSpeak/config.json`
+编辑 `~/.config/iSpeak/config.json`：
 
 ```json
 {
-  "apiKey": "bfa4b2a7-7465-44d2-9626-d26abfc24baa",
+  "apiKey": "YOUR-API-KEY",
   "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
   "defaultVoice": {
-    "voice_type": "zh_female_xiaohe_uranus_bigtts",
+    "voice_type": "zh_female_mizai_uranus_bigtts",
     "resourceId": "seed-tts-2.0"
   },
   "sourceVoices": {
     "claude": {
-      "voice_type": "zh_female_wanwanxiaohe_moon_bigtts",
-      "resourceId": "seed-tts-1.0"
+      "voice_type": "zh_female_tianmeitaozi_uranus_bigtts",
+      "resourceId": "seed-tts-2.0"
     },
     "codex": {
-      "voice_type": "zh_female_tianmeitaozi_uranus_bigtts",
+      "voice_type": "zh_male_shaonianzixin_uranus_bigtts",
       "resourceId": "seed-tts-2.0"
     }
   }
 }
 ```
 
-## Hook 配置
+**如何获取 API Key？**
+前往 [火山引擎 TTS 控制台](https://console.volcengine.com/tts) 申请。
+
+## Claude Code / Codex Hook 集成
 
 Claude Code (`~/.claude/settings.json`)：
 ```json
@@ -73,7 +84,7 @@ Claude Code (`~/.claude/settings.json`)：
     "Stop": [{
       "hooks": [{
         "type": "command",
-        "command": "bash /Users/admin/.config/iSpeak/hook-speak.sh claude",
+        "command": "bash $HOME/.config/iSpeak/hook-speak.sh claude",
         "timeout": 30
       }]
     }]
@@ -88,7 +99,7 @@ Codex (`~/.codex/hooks.json`)：
     "Stop": [{
       "hooks": [{
         "type": "command",
-        "command": "bash /Users/admin/.config/iSpeak/hook-speak.sh codex",
+        "command": "bash $HOME/.config/iSpeak/hook-speak.sh codex",
         "timeout": 30
       }]
     }]
@@ -96,40 +107,49 @@ Codex (`~/.codex/hooks.json`)：
 }
 ```
 
-## 音色用途
+## 工作原理
 
-| 命令 | 音色 | 来源 |
-|------|------|------|
-| `ispeak` | 小何 | seed-tts-2.0 |
-| `ispeak-claude` | 湾湾 | Claude Code |
-| `ispeak-codex` | 桃子 | Codex |
-
-## CLI 对话测试
-
-```bash
-# Claude Code
-claude -p "说一句话"
-
-# Codex
-codex exec "说一句话"
+```
+CLI (nc socket)
+    ↓
+Unix Socket /tmp/ispeak.sock
+    ↓
+ispeakd 守护进程
+    ├─ TTS 合成（context cancel 支持，新请求取消旧请求）
+    └─ playbackWorker（串行播放，按序号排序）
+              ↓
+        afplay 播放
 ```
 
-## 稳定性策略
+**打断机制**：新消息到达时，正在播放的音频被 kill，正在合成的 TTS 请求被 context cancel。只为最终想听的那条消息付费。
 
-- TTS 并发、播放串行（避免音频重叠）
-- TTS 并发上限：`4`
-- 失败自动重试：`1` 次
-- 关键 worker 带 `panic recover`
+## 稳定性设计
+
+- 播放严格按序号顺序，不乱序
+- 缓冲队列上限 64 条，超时 60s 跳过
+- 播放失败自动重试 1 次
+- 关键 goroutine 有 `panic recover`
+- 配置热更新，无需重启服务
 
 ## 路径速查
 
-- `~/Library/LaunchAgents/com.iSpeak.plist`
-- `/tmp/ispeak.sock`
-- `/tmp/iSpeak.log`
-- `~/.config/iSpeak/config.json`
-- `~/.config/iSpeak/hook-speak.sh`
-- `~/.local/bin/ispeakd`
-- `~/.local/bin/ispeak`, `ispeak-claude`, `ispeak-codex`
+| 路径 | 说明 |
+|------|------|
+| `~/Library/LaunchAgents/com.iSpeak.plist` | macOS launchd 服务 |
+| `/tmp/ispeak.sock` | Unix Socket |
+| `/tmp/iSpeak.log` | 日志文件 |
+| `~/.config/iSpeak/config.json` | 配置文件 |
+| `~/.config/iSpeak/hook-speak.sh` | Claude/Codex Hook 脚本 |
+| `~/.local/bin/ispeakd` | 守护进程 |
+| `~/.local/bin/ispeak*` | CLI 软链 |
+
+## 开发
+
+```bash
+make build    # 编译
+make install  # 安装到 ~/.local/bin 并启动服务
+make deploy   # 完整部署（install + 配置文件）
+```
 
 ## License
 
