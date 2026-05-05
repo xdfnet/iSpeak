@@ -2,53 +2,83 @@
 # ispeak — iSpeak 控制命令
 set -euo pipefail
 
+VERSION="1.0.0"
 SOCK=/tmp/ispeak.sock
 PLIST="$HOME/Library/LaunchAgents/com.iSpeak.plist"
 LOG=/tmp/iSpeak.log
+BIN_DIR="$(dirname "$(readlink -f "$0")")"
 
 usage() {
-  cat <<'EOF'
-usage:
-  ispeak "文本"            直接播报
-  ispeak say "文本"        播报文本
-  ispeak status            查看服务/Socket状态
-  ispeak test [文本]       发送测试播报
-  ispeak restart           重启服务
-  ispeak recover           重启并自检
+  cat <<EOF
+iSpeak $VERSION
+
+用法:
+  ispeak "文本"             直接播报
+  ispeak say "文本"         播报文本
+  ispeak status             查看服务状态
+  ispeak restart            重启服务
+  ispeak recover           重启 + 状态检查 + 测试
   ispeak logs [N]          查看最近 N 行日志（默认 50）
   ispeak tail              实时日志
+  ispeak version            查看版本
+  ispeak help              显示帮助
 EOF
 }
 
 send_text() {
   local text="$1"
   [[ -z "$text" ]] && return 0
-  printf "%s" "$text" | nc -U -w5 "$SOCK" 2>/dev/null || {
+  if printf "%s" "$text" | nc -U -w5 "$SOCK" 2>/dev/null; then
+    return 0
+  else
     echo "ispeak: 发送失败（socket 不可用）" >&2
     return 1
-  }
+  fi
 }
 
-# 根据程序名获取默认来源
-get_default_source() {
-  local prog="$(basename "$0")"
-  case "$prog" in
-    ispeak-claude) echo "claude" ;;
-    ispeak-codex) echo "codex" ;;
-    *) echo "" ;;
-  esac
+# 纯 bash JSON 解析（不支持嵌套数组）
+parse_voice() {
+  local json="$1"
+  local key="$2"
+  echo "$json" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*{[^}]*\"voice_type\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+}
+
+parse_voice_field() {
+  local json="$1"
+  local voice_key="$2"
+  local field="$3"
+  # 提取指定 voice 的指定字段
+  echo "$json" | python3 -c "
+import json, sys, re
+try:
+    data = json.load(sys.stdin)
+    voices = data.get('sourceVoices', {})
+    v = voices.get('$voice_key', {})
+    print(v.get('$field', '?'))
+except:
+    print('?')
+" 2>/dev/null || echo "?"
 }
 
 cmd_status() {
   echo "== iSpeak 状态 =="
-  launchctl list | grep -i iSpeak | awk '{print "  进程: PID="$1" 状态="$3}'
+  local pid=$(launchctl list | grep -i iSpeak | awk '{print $1}' | head -1)
+  if [[ -n "$pid" && "$pid" != "-" ]]; then
+    echo "  进程: PID=$pid"
+  else
+    echo "  进程: 未运行"
+  fi
   echo "  Socket: $SOCK"
-  ls -l "$SOCK" 2>/dev/null | awk '{print "  "$1" "$9}' || echo "  ✗ socket 缺失"
+  if [[ -S "$SOCK" ]]; then
+    echo "  Socket: ✓ 已连接"
+  else
+    echo "  Socket: ✗ 未连接"
+  fi
   echo ""
   echo "== 音色配置 =="
   local cfg="$HOME/.config/iSpeak/config.json"
   if [[ -f "$cfg" ]]; then
-    python3 - "$cfg" <<'PYEOF' 2>/dev/null
+    python3 - "$cfg" 2>/dev/null <<'PYEOF' || echo "  解析失败"
 import json, sys
 try:
     with open(sys.argv[1]) as f:
@@ -70,13 +100,18 @@ PYEOF
 
 cmd_restart() {
   launchctl unload "$PLIST" 2>/dev/null || true
-  rm -f "$SOCK"
   launchctl load "$PLIST"
-  echo "ispeak: restarted"
+  sleep 0.5
+  if [[ -S "$SOCK" ]]; then
+    echo "ispeak: 已重启"
+  else
+    echo "ispeak: 重启失败，请检查日志"
+    return 1
+  fi
 }
 
 cmd_test() {
-  local text="${1:-飞哥，ispeak 测试通过}"
+  local text="${1:-飞哥，iSpeak 测试通过}"
   send_text "$(build_msg "$text")"
 }
 
@@ -89,22 +124,18 @@ cmd_tail() {
   tail -f "$LOG"
 }
 
-if [[ $# -eq 0 ]]; then
-  usage
-  exit 1
-fi
+cmd_version() {
+  echo "iSpeak $VERSION"
+}
 
-# 处理全局 --source 参数
-SOURCE_FLAG=""
-if [[ "$1" == "--source" ]]; then
-  SOURCE_FLAG="$2"
-  shift 2
-fi
-
-# 如果程序名是 ispeak-claude 或 ispeak-codex，设置默认来源
-if [[ -z "$SOURCE_FLAG" ]]; then
-  SOURCE_FLAG=$(get_default_source)
-fi
+get_default_source() {
+  local prog="$(basename "$0")"
+  case "$prog" in
+    ispeak-claude) echo "claude" ;;
+    ispeak-codex) echo "codex" ;;
+    *) echo "" ;;
+  esac
+}
 
 build_msg() {
   local text="$1"
@@ -114,6 +145,22 @@ build_msg() {
     echo "$text"
   fi
 }
+
+# ---------- 主入口 ----------
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 1
+fi
+
+SOURCE_FLAG=""
+if [[ "$1" == "--source" ]]; then
+  SOURCE_FLAG="$2"
+  shift 2
+fi
+
+if [[ -z "$SOURCE_FLAG" ]]; then
+  SOURCE_FLAG=$(get_default_source)
+fi
 
 case "$1" in
   status)
@@ -140,8 +187,9 @@ case "$1" in
     ;;
   recover)
     cmd_restart
-    sleep 1
+    echo ""
     cmd_status
+    echo ""
     cmd_test
     ;;
   logs)
@@ -151,11 +199,13 @@ case "$1" in
   tail)
     cmd_tail
     ;;
+  version|-v|--version)
+    cmd_version
+    ;;
   help|-h|--help)
     usage
     ;;
   *)
-    # 兼容：ispeak "文本"
     send_text "$(build_msg "$*")"
     ;;
 esac

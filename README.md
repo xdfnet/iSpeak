@@ -34,7 +34,7 @@ ispeak-codex "构建完成，耗时 12 秒"
 
 ```bash
 # 1. 安装
-git clone https://github.com/你的用户名/ispeak.git && cd ispeak && make install
+git clone https://github.com/你的用户名/ispeak.git && cd ispeak && make deploy
 
 # 2. 配置
 # 编辑 ~/.config/iSpeak/config.json，填入火山引擎 API Key
@@ -159,9 +159,12 @@ ispeak-codex "消息"    # Codex 专属音色
 ## 开发命令
 
 ```bash
-make build    # 编译 ispeakd
-make install  # 安装到 ~/.local/bin 并启动 launchd 服务
-make deploy   # 完整部署（install + 复制配置示例）
+make build      # 编译 ispeakd
+make install    # 安装并启动服务（自动自检）
+make deploy     # 安装 + 部署配置文件（不覆盖已有配置）
+make uninstall  # 卸载（停止服务 + 删除文件）
+make clean      # 清理编译产物
+make help       # 显示帮助
 ```
 
 ## 文件路径
