@@ -1,6 +1,6 @@
 # iSpeak
 
-![Version](https://img.shields.io/badge/version-1.3.0-blue)
+![Version](https://img.shields.io/badge/version-1.4.0-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.26-blue)](https://golang.org/dl/)
 ![Platform](https://img.shields.io/badge/platform-macOS-green)
@@ -33,25 +33,13 @@ ispeak-codex "构建完成，耗时 12 秒"
 
 ## 快速上手
 
-**一行命令搞定一切：**
+**快速安装：**
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/xdfnet/iSpeak/master/setup.sh)"
+git clone https://github.com/xdfnet/iSpeak.git && cd iSpeak && make install
 ```
 
-脚本会交互式完成：
-1. 安装 ispeakd 服务
-2. 引导输入 API Key
-3. 自动配置 Claude Code / Codex 的 Hook
-
-**或手动安装：**
-
-```bash
-git clone https://github.com/你的用户名/ispeak.git && cd ispeak && make deploy
-# 然后手动编辑 ~/.config/iSpeak/config.json 填入 API Key
-```
-
-安装完成后验证：
+安装时手动输入 API Key，然后验证：
 
 ```bash
 ispeak status
