@@ -20,6 +20,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 const (
@@ -42,6 +44,9 @@ var (
 	seqMu   sync.Mutex
 	nextSeq uint64 = 0
 )
+
+// 进程级 temp 目录（进程退出时清理）
+var tempDir string
 
 func nextSequence() uint64 {
 	seqMu.Lock()
@@ -306,17 +311,42 @@ func cleanText(text string) string {
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lshortfile)
+
+	// 日志轮转：最大 10MB，保留 3 份
+	log.SetOutput(&lumberjack.Logger{
+		Filename:   "/tmp/iSpeak.log",
+		MaxSize:    10,
+		MaxBackups: 3,
+		Compress:   true,
+	})
+
+	// 创建进程级 temp 目录
+	cleanupOldTempDirs()
+	var err error
+	tempDir, err = os.MkdirTemp("", "ttsd-*")
+	if err != nil {
+		log.Fatalf("创建 temp 目录失败: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
 	cfg := loadConfig()
-	if cfg.APIKey == "" {
-		log.Fatal("缺少 TTS 凭证: 请设置 IAGENT_TTS_API_KEY 环境变量")
+	if err := validateConfig(cfg); err != nil {
+		log.Fatalf("配置错误: %v", err)
 	}
 
 	socketPath := "/tmp/ispeak.sock"
-	os.Remove(socketPath)
-
+	// 先尝试监听，若地址被占用说明已有实例在跑
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		log.Fatalf("监听 socket 失败: %v", err)
+		if strings.Contains(err.Error(), "address already in use") {
+			log.Fatalf("iSpeak 已在运行，请先关闭旧实例或重启")
+		}
+		// socket 文件残留，清理后重试
+		os.Remove(socketPath)
+		listener, err = net.Listen("unix", socketPath)
+		if err != nil {
+			log.Fatalf("监听 socket 失败: %v", err)
+		}
 	}
 	defer os.Remove(socketPath)
 
@@ -344,6 +374,33 @@ func main() {
 		}
 		go handleConnection(conn, playQueue, interruptCh)
 	}
+}
+
+// 清理历史遗留的 temp 目录（进程崩溃时留下）
+func cleanupOldTempDirs() {
+	entries, err := os.ReadDir(os.TempDir())
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "ttsd-") {
+			os.RemoveAll(filepath.Join(os.TempDir(), e.Name()))
+		}
+	}
+}
+
+// 校验配置必填项
+func validateConfig(cfg Config) error {
+	if cfg.APIKey == "" {
+		return fmt.Errorf("apiKey 未设置，编辑 ~/.config/iSpeak/config.json")
+	}
+	if cfg.Endpoint == "" {
+		return fmt.Errorf("endpoint 未设置")
+	}
+	if cfg.DefaultVoice == nil || cfg.DefaultVoice.VoiceType == "" {
+		return fmt.Errorf("defaultVoice 未设置")
+	}
+	return nil
 }
 
 func playbackWorker(queue <-chan playJob, interruptCh <-chan struct{}) {
@@ -422,16 +479,15 @@ func playbackWorker(queue <-chan playJob, interruptCh <-chan struct{}) {
 
 // playAudio 返回 afplay 命令对象，由调用方控制 Wait
 func playAudio(data []byte) *exec.Cmd {
-	tmpDir := os.TempDir()
-	tmpFile := filepath.Join(tmpDir, fmt.Sprintf("ttsd-%d.mp3", time.Now().UnixNano()))
+	tmpFile := filepath.Join(tempDir, fmt.Sprintf("ttsd-%d.mp3", time.Now().UnixNano()))
 	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
 		log.Printf("写入临时文件失败: %v", err)
 		return &exec.Cmd{}
 	}
-	 cmd := exec.Command("/usr/bin/afplay", tmpFile)
-	 cmd.Start()
-	 log.Printf("播放开始: %s", filepath.Base(tmpFile))
-	 go func() {
+	cmd := exec.Command("/usr/bin/afplay", tmpFile)
+	cmd.Start()
+	log.Printf("播放开始: %s", filepath.Base(tmpFile))
+	go func() {
 		cmd.Wait()
 		os.Remove(tmpFile)
 	}()
