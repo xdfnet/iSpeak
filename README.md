@@ -1,59 +1,83 @@
 # iSpeak
 
-小而美的本地 TTS 播报服务。接收文本，通过字节跳动火山引擎 TTS 生成音频，按序号顺序播放。
+A lightweight local TTS service that converts text to speech via ByteDance Volcano Engine and plays audio sequentially. Built for AI coding assistants (Claude Code, Codex) to vocalize their responses.
 
-**核心特性**：新消息打断旧播放 + TTS 合成可取消，不为旧消息付冤枉钱。
+## Features
 
-## 组成
+- **Cost-saving interruption**: New messages cancel in-flight TTS synthesis and interrupt playback — pay only for what you actually hear
+- **Sequential playback**: Global sequence numbers ensure audio plays in order, never overlapping
+- **Hot config reload**: Configuration changes take effect immediately without restarting the service
+- **Multi-voice support**: Different voices for different sources (e.g., Claude uses one voice, Codex uses another)
+- **Unix Socket communication**: Minimal dependencies, works reliably on macOS
+
+## Architecture
 
 ```
-~/.local/bin/ispeakd      守护进程（监听 Unix Socket）
-~/.local/bin/ispeak       命令行入口
-~/.local/bin/ispeak-claude  Claude Code 专用音色
-~/.local/bin/ispeak-codex   Codex 专用音色
+┌─────────────────────────────────────────────────────┐
+│  ispeak / ispeak-claude / ispeak-codex (CLI)       │
+│         nc -U /tmp/ispeak.sock                      │
+└─────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────┐
+│  ispeakd (Daemon)                                  │
+│  ┌─────────────────────────────────────────────┐   │
+│  │  TTS Context Manager                         │   │
+│  │  (single in-flight request, cancel on new)   │   │
+│  └─────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────┐   │
+│  │  Playback Worker                             │   │
+│  │  (sequential by seq#, buffered reorder)     │   │
+│  └─────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────┘
+                          │
+                          ▼
+              ┌───────────────────┐
+              │  afplay (macOS)   │
+              └───────────────────┘
 ```
 
-## 快速开始
+## Quick Start
 
 ```bash
-# 安装
-git clone https://github.com/yourname/iSpeak.git
-cd iSpeak
+# Clone and install
+git clone https://github.com/yourname/ispeak.git
+cd ispeak
 make install
 
-# 自检
+# Verify
 ispeak status
-ispeak test "你好世界"
+ispeak test "Hello, world"
 ```
 
-## 常用命令
+## Usage
 
 ```bash
-ispeak "任务完成"          # 播报文本（默认音色）
-ispeak test               # 自检播报
-ispeak test "飞哥你好"     # 自检播报（自定义文案）
-ispeak status             # 查看服务状态
-ispeak restart            # 重启服务
-ispeak recover            # 重启 + 状态检查 + 测试播报
-ispeak logs 80            # 查看最近 80 行日志
-ispeak tail               # 实时日志
+ispeak "Task completed"           # Speak with default voice
+ispeak test                       # Self-test
+ispeak test "Custom message"      # Self-test with custom text
+ispeak status                     # Check service and socket status
+ispeak restart                    # Restart the daemon
+ispeak recover                    # Restart + status + test
+ispeak logs 80                   # View last 80 log lines
+ispeak tail                       # Live log stream
 ```
 
-## 音色指定
+### Voice Selection
 
 ```bash
-ispeak "文本"              # 默认音色
-ispeak-claude "文本"      # Claude 专用音色
-ispeak-codex "文本"       # Codex 专用音色
+ispeak "message"           # Default voice
+ispeak-claude "message"    # Claude's dedicated voice
+ispeak-codex "message"     # Codex's dedicated voice
 ```
 
-## 配置
+## Configuration
 
-编辑 `~/.config/iSpeak/config.json`：
+Create `~/.config/iSpeak/config.json`:
 
 ```json
 {
-  "apiKey": "YOUR-API-KEY",
+  "apiKey": "your-volcengine-api-key",
   "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
   "defaultVoice": {
     "voice_type": "zh_female_mizai_uranus_bigtts",
@@ -72,12 +96,13 @@ ispeak-codex "文本"       # Codex 专用音色
 }
 ```
 
-**如何获取 API Key？**
-前往 [火山引擎 TTS 控制台](https://console.volcengine.com/tts) 申请。
+**Get an API key**: Sign up at [Volcengine Console](https://console.volcengine.com/tts) and create a TTS instance.
 
-## Claude Code / Codex Hook 集成
+## Claude Code / Codex Integration
 
-Claude Code (`~/.claude/settings.json`)：
+Add a Stop hook to your AI assistant's settings:
+
+**Claude Code** (`~/.claude/settings.json`):
 ```json
 {
   "hooks": {
@@ -92,7 +117,7 @@ Claude Code (`~/.claude/settings.json`)：
 }
 ```
 
-Codex (`~/.codex/hooks.json`)：
+**Codex** (`~/.codex/hooks.json`):
 ```json
 {
   "hooks": {
@@ -107,49 +132,25 @@ Codex (`~/.codex/hooks.json`)：
 }
 ```
 
-## 工作原理
-
-```
-CLI (nc socket)
-    ↓
-Unix Socket /tmp/ispeak.sock
-    ↓
-ispeakd 守护进程
-    ├─ TTS 合成（context cancel 支持，新请求取消旧请求）
-    └─ playbackWorker（串行播放，按序号排序）
-              ↓
-        afplay 播放
-```
-
-**打断机制**：新消息到达时，正在播放的音频被 kill，正在合成的 TTS 请求被 context cancel。只为最终想听的那条消息付费。
-
-## 稳定性设计
-
-- 播放严格按序号顺序，不乱序
-- 缓冲队列上限 64 条，超时 60s 跳过
-- 播放失败自动重试 1 次
-- 关键 goroutine 有 `panic recover`
-- 配置热更新，无需重启服务
-
-## 路径速查
-
-| 路径 | 说明 |
-|------|------|
-| `~/Library/LaunchAgents/com.iSpeak.plist` | macOS launchd 服务 |
-| `/tmp/ispeak.sock` | Unix Socket |
-| `/tmp/iSpeak.log` | 日志文件 |
-| `~/.config/iSpeak/config.json` | 配置文件 |
-| `~/.config/iSpeak/hook-speak.sh` | Claude/Codex Hook 脚本 |
-| `~/.local/bin/ispeakd` | 守护进程 |
-| `~/.local/bin/ispeak*` | CLI 软链 |
-
-## 开发
+## Development
 
 ```bash
-make build    # 编译
-make install  # 安装到 ~/.local/bin 并启动服务
-make deploy   # 完整部署（install + 配置文件）
+make build    # Compile the daemon
+make install  # Install to ~/.local/bin and start service
+make deploy   # Full deployment (install + config files)
 ```
+
+## File Locations
+
+| Path | Description |
+|------|-------------|
+| `~/Library/LaunchAgents/com.iSpeak.plist` | macOS launchd service |
+| `/tmp/ispeak.sock` | Unix domain socket |
+| `/tmp/iSpeak.log` | Log output |
+| `~/.config/iSpeak/config.json` | Configuration |
+| `~/.config/iSpeak/hook-speak.sh` | Claude/Codex hook script |
+| `~/.local/bin/ispeakd` | Daemon binary |
+| `~/.local/bin/ispeak*` | CLI symlinks |
 
 ## License
 
