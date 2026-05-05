@@ -61,18 +61,21 @@ except:
 }
 
 cmd_status() {
+  local ok=true
   echo "== iSpeak 状态 =="
-  local pid=$(launchctl list | grep -i iSpeak | awk '{print $1}' | head -1)
+  local pid=$(launchctl list 2>/dev/null | grep -i iSpeak | awk '{print $1}' | head -1)
   if [[ -n "$pid" && "$pid" != "-" ]]; then
-    echo "  进程: PID=$pid"
+    echo "  进程: PID=$pid ✓"
   else
-    echo "  进程: 未运行"
+    echo "  进程: 未运行 ✗"
+    ok=false
   fi
   echo "  Socket: $SOCK"
   if [[ -S "$SOCK" ]]; then
     echo "  Socket: ✓ 已连接"
   else
     echo "  Socket: ✗ 未连接"
+    ok=false
   fi
   echo ""
   echo "== 音色配置 =="
@@ -95,6 +98,12 @@ except Exception as e:
 PYEOF
   else
     echo "  配置文件不存在: $cfg"
+  fi
+
+  if $ok; then
+    return 0
+  else
+    return 1
   fi
 }
 
