@@ -1,3 +1,9 @@
-build/
+# macOS
 .DS_Store
-*.sum
+
+# Build artifacts
+build/
+iSpeak
+
+# Local agent/context files
+AGENTS.md
