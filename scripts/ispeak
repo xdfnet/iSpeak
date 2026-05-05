@@ -43,6 +43,7 @@ case "${1:-}" in
     echo "  ispeak \"文本\"     播报"
     echo "  ispeak status      服务状态"
     echo "  ispeak restart     重启服务"
+    echo "  ispeak version     版本"
     ;;
   *)
     printf "%s" "$*" | nc -U -w5 "$SOCK" 2>/dev/null || echo "ispeak: socket 不可用" >&2

@@ -76,6 +76,7 @@ ispeak test "iSpeak 准备好了"
 ispeak "消息"    # 播报
 ispeak status    # 服务状态
 ispeak restart   # 重启服务
+ispeak version   # 版本
 ```
 
 语音专属快捷命令（指向 ispeak 的软链接）：
