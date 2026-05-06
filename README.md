@@ -1,6 +1,6 @@
 # iSpeak
 
-![Version](https://img.shields.io/badge/version-1.6.0-blue)
+![Version](https://img.shields.io/badge/version-1.6.1-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.26-blue)](https://golang.org/dl/)
 ![Platform](https://img.shields.io/badge/platform-macOS-green)
@@ -33,7 +33,19 @@ ispeak-codex "构建完成，耗时 12 秒"
 
 ## 快速上手
 
-**快速安装：**
+**npm 安装：**
+
+```bash
+npm i -g @xdfnet/ispeak
+```
+
+当前 npm 安装会在本机编译 `ispeakd`，需要已安装 Go。没有 `ffplay` 时会自动回退 `afplay`；推荐安装 `ffmpeg` 获得流式播放：
+
+```bash
+brew install ffmpeg
+```
+
+**源码安装：**
 
 ```bash
 git clone https://github.com/xdfnet/iSpeak.git && cd iSpeak && make install
