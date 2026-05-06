@@ -1,6 +1,6 @@
 # iSpeak
 
-![Version](https://img.shields.io/badge/version-1.5.0-blue)
+![Version](https://img.shields.io/badge/version-1.6.0-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.26-blue)](https://golang.org/dl/)
 ![Platform](https://img.shields.io/badge/platform-macOS-green)
@@ -27,7 +27,7 @@ ispeak-codex "构建完成，耗时 12 秒"
 | 问题 | 方案 |
 |------|------|
 | AI 生成多条回复，TTS 账单飞涨 | 新消息只保留最新待合成任务，避免无效合成 |
-| 回复快慢不一，音频播报乱序 | 单合成 + 单播放 worker，FIFO 顺序稳定 |
+| 回复快慢不一，音频播报乱序 | 单 speak worker，FIFO 顺序稳定 |
 | 修改配置要重启服务 | 热更新：编辑 `config.json` 立即生效 |
 | 默认音色太无聊 | 来源专属音色，Claude 和 Codex 声音不同 |
 
@@ -59,22 +59,21 @@ ispeak test "iSpeak 准备好了"
 │         │                                            │
 │         ▼                                           │
 │   任务引擎                                           │
-│   （pending_synth → synthesizing                     │
-│    → pending_play → playing → delete）               │
+│   （pending_synth → speaking → delete）              │
 │         │                                            │
 │         ▼                                           │
-│   双 Worker 流水线                                   │
-│   （单合成 worker + 单播放 worker）                  │
+│   单 Worker 流式链路                                 │
+│   （SSE audio chunk → 播放器 stdin）                  │
 │         │                                            │
 │         ▼                                           │
-│   常驻播放器子进程                                   │
-│   （主进程发路径命令，子进程播完回执）                │
+│   流式播放器                                         │
+│   （优先 ffplay stdin，无 ffplay 回退 afplay）         │
 └─────────────────────────────────────────────────────┘
 ```
 
 **任务状态流转：**
 ```
-pending_synth → synthesizing → pending_play → playing → delete
+pending_synth → speaking → delete
 ```
 
 ## 全部命令

@@ -1,5 +1,5 @@
 // ttsd — 独立 TTS 播报守护进程
-// 监听 Unix Socket，收到文本 → 字节跳动 TTS → afplay 播放
+// 监听 Unix Socket，收到文本 → 字节跳动 TTS SSE → 流式播放
 package main
 
 import (
@@ -26,10 +26,8 @@ import (
 )
 
 const (
-	ttsMaxAttempts   = 2
-	ttsRetryBackoff  = 400 * time.Millisecond
-	playMaxAttempts  = 2
-	playRetryBackoff = 200 * time.Millisecond
+	ttsMaxAttempts  = 2
+	ttsRetryBackoff = 400 * time.Millisecond
 )
 
 var configDir = os.ExpandEnv("$HOME/.config/iSpeak")
@@ -47,181 +45,128 @@ var ttsHTTPClient = &http.Client{Timeout: 30 * time.Second}
 // 进程级 temp 目录（进程退出时清理）
 var tempDir string
 
-type AudioPlayer interface {
-	Play(audio []byte) error
-	Close() error
+var errAlreadyRunning = errors.New("iSpeak already running")
+
+type StreamPlayer interface {
+	Write(audio []byte) error
+	CloseAndWait() error
+	Abort() error
 }
 
-type playerCommand struct {
-	Path string `json:"path"`
+type ffplayStreamPlayer struct {
+	path  string
+	cmd   *exec.Cmd
+	stdin io.WriteCloser
 }
 
-type playerResponse struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-}
-
-type commandPlayer struct {
-	mu     sync.Mutex
-	cmd    *exec.Cmd
-	stdin  *bufio.Writer
-	input  io.WriteCloser
-	stdout io.ReadCloser
-	dec    *json.Decoder
-}
-
-func newCommandPlayer() (*commandPlayer, error) {
-	p := &commandPlayer{}
-	if err := p.startLocked(); err != nil {
-		return nil, err
+func newDefaultStreamPlayer() (StreamPlayer, error) {
+	if path, ok := findExecutable("ffplay", "/opt/homebrew/bin/ffplay", "/usr/local/bin/ffplay"); ok {
+		log.Printf("播放器模式: ffplay 流式 stdin (%s)", path)
+		return newFFplayStreamPlayer(path)
 	}
-	return p, nil
+
+	log.Printf("播放器模式: afplay 完整音频 fallback")
+	return &bufferedStreamPlayer{}, nil
 }
 
-func (p *commandPlayer) startLocked() error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
+func findExecutable(name string, candidates ...string) (string, bool) {
+	if path, err := exec.LookPath(name); err == nil {
+		return path, true
 	}
-	cmd := exec.Command(exe, "--player-worker")
+	for _, path := range candidates {
+		if st, err := os.Stat(path); err == nil && !st.IsDir() && st.Mode()&0111 != 0 {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+func newFFplayStreamPlayer(path string) (*ffplayStreamPlayer, error) {
+	cmd := exec.Command(path, "-nodisp", "-autoexit", "-loglevel", "error", "-i", "pipe:0")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
-		return err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		stdin.Close()
-		return err
+		return nil, err
 	}
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
-		_ = stdout.Close()
-		return err
+		return nil, err
 	}
-	p.cmd = cmd
-	p.input = stdin
-	p.stdin = bufio.NewWriter(stdin)
-	p.stdout = stdout
-	p.dec = json.NewDecoder(stdout)
-	go func(c *exec.Cmd) {
-		_ = c.Wait()
-	}(cmd)
+	return &ffplayStreamPlayer{path: path, cmd: cmd, stdin: stdin}, nil
+}
+
+func (p *ffplayStreamPlayer) Write(audio []byte) error {
+	if len(audio) == 0 {
+		return nil
+	}
+	if _, err := p.stdin.Write(audio); err != nil {
+		return fmt.Errorf("写入播放器失败: %w", err)
+	}
 	return nil
 }
 
-func (p *commandPlayer) restartLocked() error {
-	if p.input != nil {
-		_ = p.input.Close()
-	}
-	if p.cmd != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-	}
-	if p.stdout != nil {
-		_ = p.stdout.Close()
-	}
-	p.cmd = nil
-	p.input = nil
-	p.stdin = nil
-	p.stdout = nil
-	p.dec = nil
-	return p.startLocked()
-}
-
-func (p *commandPlayer) Play(audio []byte) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.stdin == nil || p.dec == nil {
-		if err := p.startLocked(); err != nil {
-			return err
-		}
-	}
-
-	tmpFile := filepath.Join(tempDir, fmt.Sprintf("ttsd-%d.mp3", time.Now().UnixNano()))
-	if err := os.WriteFile(tmpFile, audio, 0644); err != nil {
-		return fmt.Errorf("写入临时文件失败: %w", err)
-	}
-	defer os.Remove(tmpFile)
-
-	playOnce := func() error {
-		cmdMsg := playerCommand{Path: tmpFile}
-		if err := p.decodedWrite(cmdMsg); err != nil {
-			return err
-		}
-		resp, err := p.decodedRead()
-		if err != nil {
-			return err
-		}
-		if !resp.OK {
-			if resp.Error == "" {
-				return errors.New("player worker failed")
-			}
-			return errors.New(resp.Error)
-		}
-		return nil
-	}
-
-	if err := playOnce(); err == nil {
-		return nil
-	}
-	if err := p.restartLocked(); err != nil {
-		return err
-	}
-	return playOnce()
-}
-
-func (p *commandPlayer) decodedWrite(cmdMsg playerCommand) error {
-	b, err := json.Marshal(cmdMsg)
-	if err != nil {
-		return err
-	}
-	if _, err := p.stdin.Write(append(b, '\n')); err != nil {
-		return err
-	}
-	return p.stdin.Flush()
-}
-
-func (p *commandPlayer) decodedRead() (playerResponse, error) {
-	var resp playerResponse
-	if err := p.dec.Decode(&resp); err != nil {
-		return playerResponse{}, err
-	}
-	return resp, nil
-}
-
-func (p *commandPlayer) Close() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.input != nil {
-		_ = p.input.Close()
-		p.input = nil
-	}
-	if p.stdout != nil {
-		_ = p.stdout.Close()
-		p.stdout = nil
-	}
+func (p *ffplayStreamPlayer) CloseAndWait() error {
 	if p.stdin != nil {
+		if err := p.stdin.Close(); err != nil {
+			return fmt.Errorf("关闭播放器输入失败: %w", err)
+		}
 		p.stdin = nil
 	}
-	p.dec = nil
+	if err := p.cmd.Wait(); err != nil {
+		return fmt.Errorf("ffplay failed: %w", err)
+	}
+	return nil
+}
+
+func (p *ffplayStreamPlayer) Abort() error {
+	if p.stdin != nil {
+		_ = p.stdin.Close()
+		p.stdin = nil
+	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
-		p.cmd = nil
+		_ = p.cmd.Wait()
 	}
+	return nil
+}
+
+type bufferedStreamPlayer struct {
+	chunks [][]byte
+}
+
+func (p *bufferedStreamPlayer) Write(audio []byte) error {
+	if len(audio) == 0 {
+		return nil
+	}
+	chunk := append([]byte(nil), audio...)
+	p.chunks = append(p.chunks, chunk)
+	return nil
+}
+
+func (p *bufferedStreamPlayer) CloseAndWait() error {
+	total := 0
+	for _, chunk := range p.chunks {
+		total += len(chunk)
+	}
+	audio := make([]byte, 0, total)
+	for _, chunk := range p.chunks {
+		audio = append(audio, chunk...)
+	}
+	return playAudio(audio)
+}
+
+func (p *bufferedStreamPlayer) Abort() error {
+	p.chunks = nil
 	return nil
 }
 
 // 任务状态
-// 生命周期：pending_synth -> synthesizing -> pending_play -> playing -> delete
+// 生命周期：pending_synth -> speaking -> delete
 type TaskStatus int
 
 const (
 	TaskStatusPendingSynth TaskStatus = iota
-	TaskStatusSynthesizing
-	TaskStatusPendingPlay
-	TaskStatusPlaying
+	TaskStatusSpeaking
 )
 
 // 单个 TTS 任务
@@ -231,38 +176,33 @@ type Task struct {
 	Status TaskStatus
 	Voice  VoiceInfo
 	Cfg    Config
-	Audio  []byte
 }
 
-// 任务引擎：任务仓库 + 单合成 worker + 单播放 worker
+// 任务引擎：任务仓库 + 单流式合成播放 worker
 type TaskEngine struct {
 	mu sync.Mutex
 
 	nextID       uint64
 	tasks        map[uint64]*Task
 	pendingSynth []uint64
-	pendingPlay  []uint64
 
 	synthWake chan struct{}
-	playWake  chan struct{}
 
-	synthesizeFn func(ctx context.Context, cfg Config, text string, voice *VoiceInfo) ([]byte, error)
-	playFn       func(audio []byte) error
+	synthesizeStreamFn func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error
+	newStreamPlayerFn  func() (StreamPlayer, error)
 }
 
 func NewTaskEngine() *TaskEngine {
 	return &TaskEngine{
-		tasks:        make(map[uint64]*Task),
-		synthWake:    make(chan struct{}, 1),
-		playWake:     make(chan struct{}, 1),
-		synthesizeFn: synthesize,
-		playFn:       playAudio,
+		tasks:              make(map[uint64]*Task),
+		synthWake:          make(chan struct{}, 1),
+		synthesizeStreamFn: synthesizeStream,
+		newStreamPlayerFn:  newDefaultStreamPlayer,
 	}
 }
 
 func (e *TaskEngine) Start() {
-	go e.synthWorker()
-	go e.playWorker()
+	go e.speakWorker()
 }
 
 func (e *TaskEngine) Submit(text string, voice VoiceInfo, cfg Config) uint64 {
@@ -292,13 +232,7 @@ func (e *TaskEngine) Submit(text string, voice VoiceInfo, cfg Config) uint64 {
 	return task.ID
 }
 
-func (e *TaskEngine) synthWorker() {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("合成 worker 崩溃: %v", r)
-		}
-	}()
-
+func (e *TaskEngine) speakWorker() {
 	for {
 		id := e.claimPendingSynth()
 		if id == 0 {
@@ -306,73 +240,70 @@ func (e *TaskEngine) synthWorker() {
 			continue
 		}
 
-		task, ok := e.getTask(id)
-		if !ok {
-			continue
-		}
-
-		var (
-			audio   []byte
-			lastErr error
-		)
-		for i := 1; i <= ttsMaxAttempts; i++ {
-			audio, lastErr = e.synthesizeFn(context.Background(), task.Cfg, task.Text, &task.Voice)
-			if lastErr == nil {
-				break
-			}
-			if i < ttsMaxAttempts {
-				time.Sleep(ttsRetryBackoff)
-			}
-		}
-
-		if lastErr != nil {
-			log.Printf("TTS 失败并删除任务: id=%d err=%v", id, lastErr)
-			e.deleteTask(id)
-			continue
-		}
-
-		e.markPendingPlay(id, audio)
-		notify(e.playWake)
+		e.processSpeakTask(id)
 	}
 }
 
-func (e *TaskEngine) playWorker() {
+func (e *TaskEngine) processSpeakTask(id uint64) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("播放 worker 崩溃: %v", r)
+			log.Printf("播报任务崩溃并删除: id=%d err=%v", id, r)
+			e.deleteTask(id)
 		}
 	}()
 
-	for {
-		id := e.claimPendingPlay()
-		if id == 0 {
-			<-e.playWake
-			continue
-		}
-
-		task, ok := e.getTask(id)
-		if !ok {
-			continue
-		}
-
-		var lastErr error
-		for i := 1; i <= playMaxAttempts; i++ {
-			lastErr = e.playFn(task.Audio)
-			if lastErr == nil {
-				break
-			}
-			if i < playMaxAttempts {
-				time.Sleep(playRetryBackoff)
-			}
-		}
-
-		if lastErr != nil {
-			log.Printf("播放失败并删除任务: id=%d err=%v", id, lastErr)
-		} else {
-			log.Printf("播放完成并删除任务: id=%d", id)
-		}
-		e.deleteTask(id)
+	task, ok := e.getTask(id)
+	if !ok {
+		return
 	}
+
+	var lastErr error
+	for i := 1; i <= ttsMaxAttempts; i++ {
+		lastErr = e.speakOnce(context.Background(), task)
+		if lastErr == nil {
+			break
+		}
+		if i < ttsMaxAttempts {
+			time.Sleep(ttsRetryBackoff)
+		}
+	}
+
+	if lastErr != nil {
+		log.Printf("播报失败并删除任务: id=%d err=%v", id, lastErr)
+		e.deleteTask(id)
+		return
+	}
+
+	log.Printf("播报完成并删除任务: id=%d", id)
+	e.deleteTask(id)
+}
+
+func (e *TaskEngine) speakOnce(ctx context.Context, task *Task) error {
+	startedAt := time.Now()
+	player, err := e.newStreamPlayerFn()
+	if err != nil {
+		return fmt.Errorf("启动播放器失败: %w", err)
+	}
+
+	firstChunkLogged := false
+	onAudio := func(audio []byte) error {
+		if len(audio) > 0 && !firstChunkLogged {
+			firstChunkLogged = true
+			log.Printf("首个音频 chunk: id=%d elapsed=%s bytes=%d", task.ID, time.Since(startedAt).Round(time.Millisecond), len(audio))
+		}
+		return player.Write(audio)
+	}
+
+	if err := e.synthesizeStreamFn(ctx, task.Cfg, task.Text, &task.Voice, onAudio); err != nil {
+		_ = player.Abort()
+		return err
+	}
+	log.Printf("TTS 流结束: id=%d elapsed=%s", task.ID, time.Since(startedAt).Round(time.Millisecond))
+	if err := player.CloseAndWait(); err != nil {
+		_ = player.Abort()
+		return err
+	}
+	return nil
 }
 
 func (e *TaskEngine) claimPendingSynth() uint64 {
@@ -389,44 +320,10 @@ func (e *TaskEngine) claimPendingSynth() uint64 {
 		if task.Status != TaskStatusPendingSynth {
 			continue
 		}
-		task.Status = TaskStatusSynthesizing
+		task.Status = TaskStatusSpeaking
 		return id
 	}
 	return 0
-}
-
-func (e *TaskEngine) claimPendingPlay() uint64 {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	for len(e.pendingPlay) > 0 {
-		id := e.pendingPlay[0]
-		e.pendingPlay = e.pendingPlay[1:]
-		task, ok := e.tasks[id]
-		if !ok {
-			continue
-		}
-		if task.Status != TaskStatusPendingPlay {
-			continue
-		}
-		task.Status = TaskStatusPlaying
-		return id
-	}
-	return 0
-}
-
-func (e *TaskEngine) markPendingPlay(id uint64, audio []byte) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	task, ok := e.tasks[id]
-	if !ok {
-		return
-	}
-	task.Audio = audio
-	task.Status = TaskStatusPendingPlay
-	e.pendingPlay = append(e.pendingPlay, id)
-	log.Printf("合成完成转待播放: id=%d", id)
 }
 
 func (e *TaskEngine) getTask(id uint64) (*Task, bool) {
@@ -545,8 +442,30 @@ type ttsAudioParams struct {
 	SampleRate int    `json:"sample_rate"`
 }
 
-// 调用字节跳动 TTS API，返回 MP3 音频数据
+// 调用字节跳动 TTS API，返回完整 MP3 音频数据。保留给测试和 fallback 使用。
 func synthesize(ctx context.Context, cfg Config, text string, voice *VoiceInfo) ([]byte, error) {
+	var chunks [][]byte
+	if err := synthesizeStream(ctx, cfg, text, voice, func(audio []byte) error {
+		chunk := append([]byte(nil), audio...)
+		chunks = append(chunks, chunk)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	total := 0
+	for _, c := range chunks {
+		total += len(c)
+	}
+	result := make([]byte, 0, total)
+	for _, c := range chunks {
+		result = append(result, c...)
+	}
+	return result, nil
+}
+
+// 调用字节跳动 TTS API，边解析 SSE 边回调 MP3 音频块
+func synthesizeStream(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {
 	speaker := voice.VoiceType
 	resourceID := voice.ResourceID
 
@@ -567,12 +486,12 @@ func synthesize(ctx context.Context, cfg Config, text string, voice *VoiceInfo) 
 
 	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
+		return fmt.Errorf("marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", cfg.Endpoint, strings.NewReader(string(body)))
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Api-Key", cfg.APIKey)
@@ -581,68 +500,27 @@ func synthesize(ctx context.Context, cfg Config, text string, voice *VoiceInfo) 
 
 	resp, err := ttsHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("http request: %w", err)
+		return fmt.Errorf("http request: %w", err)
 	}
 	if resp.StatusCode != 200 {
 		io.Copy(io.Discard, resp.Body) // 消费 body 以释放连接
 		resp.Body.Close()
-		return nil, fmt.Errorf("http status %d", resp.StatusCode)
+		return fmt.Errorf("http status %d", resp.StatusCode)
 	}
 	defer resp.Body.Close()
 
-	return parseSSE(resp.Body)
+	return parseSSEStream(resp.Body, onAudio)
 }
 
 // 解析 SSE 流，提取 base64 音频数据
 func parseSSE(r io.Reader) ([]byte, error) {
 	var chunks [][]byte
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-
-	var dataLines []string
-
-	flush := func() error {
-		if len(dataLines) == 0 {
-			return nil
-		}
-		payload := strings.Join(dataLines, "\n")
-		dataLines = dataLines[:0]
-		return processEvent(payload, &chunks)
-	}
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			if err := flush(); err != nil {
-				return nil, err
-			}
-			continue
-		}
-		if strings.HasPrefix(line, ":") || strings.HasPrefix(line, "event:") ||
-			strings.HasPrefix(line, "id:") || strings.HasPrefix(line, "retry:") {
-			continue
-		}
-		if strings.HasPrefix(line, "data:") {
-			dataLines = append(dataLines, strings.TrimPrefix(line, "data:"))
-			continue
-		}
-		// 非标准 JSON 直出
-		if err := flush(); err != nil {
-			return nil, err
-		}
-		if err := processEvent(line, &chunks); err != nil {
-			return nil, err
-		}
-	}
-	if err := flush(); err != nil {
+	if err := parseSSEStream(r, func(audio []byte) error {
+		chunk := append([]byte(nil), audio...)
+		chunks = append(chunks, chunk)
+		return nil
+	}); err != nil {
 		return nil, err
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan: %w", err)
-	}
-
-	if len(chunks) == 0 {
-		return nil, fmt.Errorf("no audio data")
 	}
 
 	total := 0
@@ -656,26 +534,91 @@ func parseSSE(r io.Reader) ([]byte, error) {
 	return result, nil
 }
 
-func processEvent(payload string, chunks *[][]byte) error {
+func parseSSEStream(r io.Reader, onAudio func([]byte) error) error {
+	audioChunks := 0
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+
+	var dataLines []string
+
+	flush := func() error {
+		if len(dataLines) == 0 {
+			return nil
+		}
+		payload := strings.Join(dataLines, "\n")
+		dataLines = dataLines[:0]
+		ok, err := processEvent(payload, onAudio)
+		if ok {
+			audioChunks++
+		}
+		return err
+	}
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			if err := flush(); err != nil {
+				return err
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") || strings.HasPrefix(line, "event:") ||
+			strings.HasPrefix(line, "id:") || strings.HasPrefix(line, "retry:") {
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, strings.TrimPrefix(line, "data:"))
+			continue
+		}
+		// 非标准 JSON 直出
+		if err := flush(); err != nil {
+			return err
+		}
+		ok, err := processEvent(line, onAudio)
+		if ok {
+			audioChunks++
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err := flush(); err != nil {
+		return err
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan: %w", err)
+	}
+
+	if audioChunks == 0 {
+		return fmt.Errorf("no audio data")
+	}
+	return nil
+}
+
+func processEvent(payload string, onAudio func([]byte) error) (bool, error) {
 	payload = strings.TrimSpace(payload)
 	if payload == "" || payload == "[DONE]" {
-		return nil
+		return false, nil
 	}
 
 	var event map[string]any
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
 		log.Printf("SSE 数据解析失败: %v", err)
-		return nil
+		return false, nil
 	}
 
 	if b64 := extractAudioBase64(event); b64 != "" {
 		data, err := base64.StdEncoding.DecodeString(b64)
-		if err == nil {
-			*chunks = append(*chunks, data)
+		if err != nil {
+			return false, fmt.Errorf("decode audio chunk: %w", err)
 		}
+		if err := onAudio(data); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 
-	return nil
+	return false, nil
 }
 
 func extractAudioBase64(event map[string]any) string {
@@ -725,11 +668,6 @@ func cleanText(text string) string {
 }
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "--player-worker" {
-		runPlayerWorker()
-		return
-	}
-
 	log.SetFlags(log.Ltime | log.Lshortfile)
 
 	// 日志轮转：最大 10MB，保留 3 份
@@ -756,18 +694,12 @@ func main() {
 	}
 
 	socketPath := configDir + "/ispeak.sock"
-	// 先尝试监听，若地址被占用说明已有实例在跑
-	listener, err := net.Listen("unix", socketPath)
+	listener, err := listenUnixSocket(socketPath)
 	if err != nil {
-		if strings.Contains(err.Error(), "address already in use") {
+		if errors.Is(err, errAlreadyRunning) {
 			log.Fatalf("iSpeak 已在运行，请先关闭旧实例或重启")
 		}
-		// socket 文件残留，清理后重试
-		os.Remove(socketPath)
-		listener, err = net.Listen("unix", socketPath)
-		if err != nil {
-			log.Fatalf("监听 socket 失败: %v", err)
-		}
+		log.Fatalf("监听 socket 失败: %v", err)
 	}
 	defer os.Remove(socketPath)
 
@@ -779,14 +711,6 @@ func main() {
 	}()
 
 	engine := NewTaskEngine()
-	player, err := newCommandPlayer()
-	if err != nil {
-		log.Fatalf("播放器子进程启动失败: %v", err)
-	} else {
-		log.Printf("播放器模式: 常驻子进程")
-		engine.playFn = player.Play
-		defer player.Close()
-	}
 	engine.Start()
 
 	log.Printf("iSpeak 已启动，监听 %s", socketPath)
@@ -800,6 +724,38 @@ func main() {
 		}
 		go handleConnection(conn, engine)
 	}
+}
+
+func listenUnixSocket(socketPath string) (net.Listener, error) {
+	listener, err := net.Listen("unix", socketPath)
+	if err == nil {
+		return listener, nil
+	}
+
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		_ = os.Remove(socketPath)
+		listener, retryErr := net.Listen("unix", socketPath)
+		if retryErr == nil {
+			return listener, nil
+		}
+		return nil, retryErr
+	}
+
+	conn, dialErr := net.DialTimeout("unix", socketPath, 200*time.Millisecond)
+	if dialErr == nil {
+		_ = conn.Close()
+		return nil, errAlreadyRunning
+	}
+
+	if removeErr := os.Remove(socketPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+		return nil, removeErr
+	}
+	listener, err = net.Listen("unix", socketPath)
+	if err != nil {
+		return nil, err
+	}
+	log.Printf("已清理残留 socket: %s", socketPath)
+	return listener, nil
 }
 
 // 清理历史遗留的 temp 目录（进程崩溃时留下）
@@ -825,49 +781,6 @@ func validateConfig(cfg Config) error {
 	}
 	if cfg.DefaultVoice == nil || cfg.DefaultVoice.VoiceType == "" {
 		return fmt.Errorf("defaultVoice 未设置")
-	}
-	return nil
-}
-
-func runPlayerWorker() {
-	scanner := bufio.NewScanner(os.Stdin)
-	enc := json.NewEncoder(os.Stdout)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		var cmdMsg playerCommand
-		if err := json.Unmarshal([]byte(line), &cmdMsg); err != nil {
-			_ = enc.Encode(playerResponse{OK: false, Error: err.Error()})
-			continue
-		}
-		if cmdMsg.Path == "" {
-			_ = enc.Encode(playerResponse{OK: false, Error: "empty path"})
-			continue
-		}
-
-		if err := playFileWithBestBackend(cmdMsg.Path); err != nil {
-			_ = enc.Encode(playerResponse{OK: false, Error: err.Error()})
-			continue
-		}
-		_ = enc.Encode(playerResponse{OK: true})
-	}
-}
-
-func playFileWithBestBackend(path string) error {
-	if _, err := exec.LookPath("ffplay"); err == nil {
-		cmd := exec.Command("ffplay", "-nodisp", "-autoexit", "-loglevel", "error", path)
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("ffplay failed: %w", err)
-		}
-		return nil
-	}
-
-	cmd := exec.Command("/usr/bin/afplay", path)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("afplay failed: %w", err)
 	}
 	return nil
 }
