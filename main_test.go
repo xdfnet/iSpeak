@@ -275,6 +275,254 @@ func TestParseSSEStreamWritesChunksInOrder(t *testing.T) {
 	}
 }
 
+func TestCleanTextRemovesSpeechNoise(t *testing.T) {
+	input := strings.Join([]string{
+		"## 结果",
+		"- **验证通过**：[main.go](/Users/admin/iCode/iSpeak/main.go:123)",
+		"- commit: a97e57d Improve latest-only task handling",
+		"- 路径：/Users/admin/iCode/iSpeak/main.go",
+		"| 文件 | 状态 |",
+		"|------|------|",
+		"| model-00001.safetensors | ✅ 完整 |",
+		"```go",
+		"fmt.Println(\"不要播代码\")",
+		"```",
+		"https://example.com/path",
+		"飞哥，需要你重启服务。",
+	}, "\n")
+
+	got := cleanText(input)
+	for _, bad := range []string{
+		"**",
+		"`",
+		"/Users/admin",
+		"https://",
+		"fmt.Println",
+		"safetensors",
+		"文件",
+		"状态",
+		"完整",
+		"|------|",
+		"a97e57d",
+	} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("expected cleaned text not to contain %q, got %q", bad, got)
+		}
+	}
+	for _, want := range []string{
+		"结果",
+		"验证通过",
+		"main.go",
+		"路径",
+		"飞哥，需要你重启服务。",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected cleaned text to contain %q, got %q", want, got)
+		}
+	}
+}
+
+func TestCleanTextOrderingPreservesLinkTitleBeforeRemovingURL(t *testing.T) {
+	got := cleanText("参考：[架构文档](https://example.com/docs)。")
+	if !strings.Contains(got, "架构文档") {
+		t.Fatalf("expected link title preserved, got %q", got)
+	}
+	if strings.Contains(got, "https://") || strings.Contains(got, "example.com") {
+		t.Fatalf("expected URL removed, got %q", got)
+	}
+}
+
+func TestCleanTextOrderingSkipsCodeBeforePathAndTableRules(t *testing.T) {
+	input := strings.Join([]string{
+		"结论保留。",
+		"```text",
+		"| 不该 | 播 |",
+		"/Users/admin/iCode/iSpeak/main.go",
+		"```",
+		"后续保留。",
+	}, "\n")
+
+	got := cleanText(input)
+	for _, bad := range []string{"不该", "/Users/admin", "main.go"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("expected code block removed before inline cleaning, got %q", got)
+		}
+	}
+	if !strings.Contains(got, "结论保留。") || !strings.Contains(got, "后续保留。") {
+		t.Fatalf("expected surrounding text preserved, got %q", got)
+	}
+}
+
+func TestCleanTextOrderingRemovesTableHeaderWhenSeparatorAppears(t *testing.T) {
+	input := strings.Join([]string{
+		"前言。",
+		"| 文件 | 状态 |",
+		"|---|---|",
+		"| main.go | 通过 |",
+		"结论。",
+	}, "\n")
+
+	got := cleanText(input)
+	for _, bad := range []string{"文件", "状态", "main.go"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("expected table header/content removed, got %q", got)
+		}
+	}
+	if !strings.Contains(got, "前言。") || !strings.Contains(got, "结论。") {
+		t.Fatalf("expected surrounding text preserved, got %q", got)
+	}
+}
+
+func TestCleanTextOrderingRemovesUUIDBeforeCommitHash(t *testing.T) {
+	got := cleanText("请求 ID：123e4567-e89b-12d3-a456-426614174000，状态成功。")
+	if strings.Contains(got, "123e4567") || strings.Contains(got, "426614174000") {
+		t.Fatalf("expected UUID removed as a whole, got %q", got)
+	}
+	if !strings.Contains(got, "状态成功。") {
+		t.Fatalf("expected conclusion preserved, got %q", got)
+	}
+}
+
+func TestCleanTextSkipsWholeMarkdownTable(t *testing.T) {
+	input := strings.Join([]string{
+		"表格如下：",
+		"| 文件 | 状态 |",
+		"|------|------|",
+		"| main.go | 通过 |",
+		"| main_test.go | 通过 |",
+		"结论：验证通过。",
+	}, "\n")
+
+	got := cleanText(input)
+	for _, bad := range []string{"文件", "状态", "main.go", "main_test.go"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("expected table content removed, got %q", got)
+		}
+	}
+	if !strings.Contains(got, "表格如下：") || !strings.Contains(got, "结论：验证通过。") {
+		t.Fatalf("expected surrounding text preserved, got %q", got)
+	}
+}
+
+func TestCleanTextSkipsArtifactAndHTML(t *testing.T) {
+	input := strings.Join([]string{
+		"这是前置结论。",
+		`<artifact identifier="demo" type="text/html">`,
+		"<!doctype html>",
+		"<html><body>不要播 HTML</body></html>",
+		"</artifact>",
+		"这是后置结论。",
+	}, "\n")
+
+	got := cleanText(input)
+	if strings.Contains(got, "HTML") || strings.Contains(got, "artifact") {
+		t.Fatalf("expected artifact/html removed, got %q", got)
+	}
+	if !strings.Contains(got, "这是前置结论。") || !strings.Contains(got, "这是后置结论。") {
+		t.Fatalf("expected surrounding conclusions preserved, got %q", got)
+	}
+}
+
+func TestCleanTextKeepsChinesePercentConclusion(t *testing.T) {
+	input := strings.Join([]string{
+		"下载 42% 12MB/s eta 1m",
+		"测试通过率 95%，可以发布。",
+	}, "\n")
+
+	got := cleanText(input)
+	if strings.Contains(got, "12MB/s") || strings.Contains(got, "eta") {
+		t.Fatalf("expected progress noise removed, got %q", got)
+	}
+	if !strings.Contains(got, "测试通过率 95%，可以发布。") {
+		t.Fatalf("expected Chinese percent conclusion preserved, got %q", got)
+	}
+}
+
+func TestCleanTextSingleLineArtifactDoesNotSwallowFollowingText(t *testing.T) {
+	input := strings.Join([]string{
+		`<artifact identifier="demo">不要播</artifact>`,
+		"后面的结论要保留。",
+	}, "\n")
+
+	got := cleanText(input)
+	if strings.Contains(got, "不要播") || strings.Contains(got, "artifact") {
+		t.Fatalf("expected single-line artifact removed, got %q", got)
+	}
+	if !strings.Contains(got, "后面的结论要保留。") {
+		t.Fatalf("expected following text preserved, got %q", got)
+	}
+}
+
+func TestHandleConnectionPreservesMultilineBeforeCleaning(t *testing.T) {
+	oldConfigDir := configDir
+	oldCacheValid := configCacheValid
+	oldCachePath := configCachePath
+	oldCacheModTime := configCacheModTime
+	oldCache := configCache
+	t.Cleanup(func() {
+		configDir = oldConfigDir
+		configCacheValid = oldCacheValid
+		configCachePath = oldCachePath
+		configCacheModTime = oldCacheModTime
+		configCache = oldCache
+	})
+
+	dir := t.TempDir()
+	configDir = dir
+	configCacheValid = false
+	cfg := `{
+		"apiKey": "key",
+		"endpoint": "https://example.com/tts",
+		"defaultVoice": {"voice_type": "voice", "resourceId": "resource"}
+	}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfg), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	server, client := net.Pipe()
+	e := NewTaskEngine()
+	done := make(chan struct{})
+	go func() {
+		handleConnection(server, e)
+		close(done)
+	}()
+
+	msg := strings.Join([]string{
+		"不是，飞哥。",
+		"",
+		"| 部分 | 是否常驻 |",
+		"|---|---|",
+		"| ispeakd | 是 |",
+		"",
+		"也就是说：daemon 常驻，播放器不是常驻。",
+	}, "\n")
+	if _, err := client.Write([]byte(msg)); err != nil {
+		t.Fatalf("write client: %v", err)
+	}
+	if err := client.Close(); err != nil {
+		t.Fatalf("close client: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatalf("handleConnection did not return")
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.pendingSynth) != 1 {
+		t.Fatalf("expected one pending task, got %d", len(e.pendingSynth))
+	}
+	task := e.tasks[e.pendingSynth[0]]
+	if !strings.Contains(task.Text, "不是，飞哥。") ||
+		!strings.Contains(task.Text, "也就是说：daemon 常驻，播放器不是常驻。") {
+		t.Fatalf("expected surrounding text preserved, got %q", task.Text)
+	}
+	if strings.Contains(task.Text, "是否常驻") || strings.Contains(task.Text, "ispeakd | 是") {
+		t.Fatalf("expected table removed, got %q", task.Text)
+	}
+}
+
 func TestInvalidSSEAudioDeletesTaskAndWorkerContinues(t *testing.T) {
 	e := NewTaskEngine()
 	e.synthesizeStreamFn = func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {

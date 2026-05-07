@@ -132,8 +132,21 @@ pending_synth -> speaking -> delete
 `handleConnection()`：
 - 读取 socket 文本
 - 解析 `{source:xxx}` 音色前缀
-- `cleanText()` 过滤 Markdown/表格符号
+- `cleanText()` 生成语音友好的文本
 - 将“过滤后文本”提交给 `TaskEngine.Submit`
+
+`cleanText()` 只影响 TTS 播报，不改变屏幕显示内容。当前清洗规则：
+
+- Markdown 格式符号：标题、加粗、反引号、引用符
+- Markdown 表格整块：表头、分隔线、表格内容
+- 代码块、artifact、HTML 页面源码
+- Markdown 链接 URL，仅保留链接标题
+- 绝对路径简化为“路径”
+- 长 commit hash、UUID、长 ID
+- 明显文件列表、模型分片列表、下载清单
+- 下载进度、速度、进度条、ANSI 控制符等终端噪声
+
+清洗目标是保留适合听的内容：结论、成功/失败状态、下一步动作、关键错误原因。
 
 ### 2. 流式合成播放阶段
 
