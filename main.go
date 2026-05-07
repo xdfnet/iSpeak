@@ -387,6 +387,17 @@ func loadConfig() Config {
 		}
 		var cfg Config
 		if json.Unmarshal(data, &cfg) == nil && cfg.APIKey != "" {
+			if err := validateConfig(cfg); err != nil {
+				log.Printf("配置文件无效: %s err=%v", p, err)
+				configCacheMu.Lock()
+				if configCacheValid {
+					cached := configCache
+					configCacheMu.Unlock()
+					return cached
+				}
+				configCacheMu.Unlock()
+				return cfg
+			}
 			log.Printf("配置文件: %s", p)
 			if cfg.DefaultVoice != nil {
 				log.Printf("默认音色: %s (%s)", cfg.DefaultVoice.VoiceType, cfg.DefaultVoice.ResourceID)
@@ -779,8 +790,26 @@ func validateConfig(cfg Config) error {
 	if cfg.Endpoint == "" {
 		return fmt.Errorf("endpoint 未设置")
 	}
-	if cfg.DefaultVoice == nil || cfg.DefaultVoice.VoiceType == "" {
-		return fmt.Errorf("defaultVoice 未设置")
+	if err := validateVoiceInfo("defaultVoice", cfg.DefaultVoice); err != nil {
+		return err
+	}
+	for source, voice := range cfg.SourceVoices {
+		if err := validateVoiceInfo(fmt.Sprintf("sourceVoices.%s", source), voice); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateVoiceInfo(name string, voice *VoiceInfo) error {
+	if voice == nil {
+		return fmt.Errorf("%s 未设置", name)
+	}
+	if voice.VoiceType == "" {
+		return fmt.Errorf("%s.voice_type 未设置", name)
+	}
+	if voice.ResourceID == "" {
+		return fmt.Errorf("%s.resourceId 未设置", name)
 	}
 	return nil
 }
@@ -809,12 +838,20 @@ func handleConnection(conn net.Conn, engine *TaskEngine) {
 	defer conn.Close()
 
 	cfg := loadConfig()
+	if err := validateConfig(cfg); err != nil {
+		log.Printf("配置错误，跳过本次播报: %v", err)
+		return
+	}
 
 	var sb strings.Builder
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 1*1024*1024), 1*1024*1024)
 	for scanner.Scan() {
 		sb.WriteString(scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("读取 socket 消息失败: %v", err)
+		return
 	}
 
 	text := strings.TrimSpace(sb.String())

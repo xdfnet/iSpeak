@@ -228,6 +228,42 @@ func TestInvalidSSEAudioDeletesTaskAndWorkerContinues(t *testing.T) {
 	waitForTaskDeleted(t, e, okID)
 }
 
+func TestValidateConfigRequiresDefaultVoiceResourceID(t *testing.T) {
+	cfg := Config{
+		APIKey:   "key",
+		Endpoint: "https://example.com/tts",
+		DefaultVoice: &VoiceInfo{
+			VoiceType: "voice",
+		},
+	}
+
+	err := validateConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "defaultVoice.resourceId") {
+		t.Fatalf("expected defaultVoice.resourceId error, got %v", err)
+	}
+}
+
+func TestValidateConfigRequiresSourceVoiceResourceID(t *testing.T) {
+	cfg := Config{
+		APIKey:   "key",
+		Endpoint: "https://example.com/tts",
+		DefaultVoice: &VoiceInfo{
+			VoiceType:  "voice",
+			ResourceID: "resource",
+		},
+		SourceVoices: map[string]*VoiceInfo{
+			"codex": {
+				VoiceType: "codex-voice",
+			},
+		},
+	}
+
+	err := validateConfig(cfg)
+	if err == nil || !strings.Contains(err.Error(), "sourceVoices.codex.resourceId") {
+		t.Fatalf("expected sourceVoices.codex.resourceId error, got %v", err)
+	}
+}
+
 type fakeStreamPlayer struct {
 	writeErr     bool
 	closeErr     bool

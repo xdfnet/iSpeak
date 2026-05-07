@@ -11,10 +11,97 @@ LOG="$HOME/.config/iSpeak/hook.log"
 
 input=$(cat)
 
+json_value() {
+  local key="$1"
+  if command -v node >/dev/null 2>&1; then
+    printf "%s" "$input" | node -e '
+      const key = process.argv[1];
+      let input = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", chunk => input += chunk);
+      process.stdin.on("end", () => {
+        try {
+          const value = JSON.parse(input)[key];
+          if (typeof value === "string") process.stdout.write(value);
+        } catch (_) {}
+      });
+    ' "$key"
+    return
+  fi
+
+  printf "%s" "$input" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+}
+
+extract_recent_assistant_text() {
+  local transcript="$1"
+  local cutoff="$2"
+
+  if command -v node >/dev/null 2>&1; then
+    node -e '
+      const fs = require("fs");
+      const file = process.argv[1];
+      const cutoff = Number(process.argv[2]);
+      const out = [];
+
+      function collectText(content) {
+        if (typeof content === "string") {
+          out.push(content);
+          return;
+        }
+        if (!Array.isArray(content)) return;
+        for (const item of content) {
+          if (item && typeof item.text === "string") out.push(item.text);
+        }
+      }
+
+      for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          if (typeof event.timestamp === "number" && event.timestamp < cutoff) continue;
+          if (event.role === "assistant") collectText(event.content);
+          if (event.message && event.message.role === "assistant") collectText(event.message.content);
+        } catch (_) {}
+      }
+      process.stdout.write([...new Set(out.filter(Boolean))].join(" "));
+    ' "$transcript" "$cutoff" 2>/dev/null
+    return
+  fi
+
+  awk -v cutoff="$cutoff" '
+    {
+      if (match($0, /"timestamp"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+        ts = substr($0, RSTART, RLENGTH)
+        gsub(/[^0-9]/, "", ts)
+        ts = int(ts)
+        if (ts < cutoff) next
+      }
+
+      if (match($0, /"role"[[:space:]]*:[[:space:]]*"assistant"/)) {
+        if (match($0, /"content"[[:space:]]*:[[:space:]]*\[/)) {
+          gsub(/[^{]*\[/, "", $0)
+          gsub(/\].*/, "", $0)
+          while (match($0, /"text"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+            t = substr($0, RSTART, RLENGTH)
+            gsub(/"text"[[:space:]]*:[[:space:]]*"/, "", t)
+            gsub(/"$/, "", t)
+            if (t != "") print t
+            $0 = substr($0, RSTART + RLENGTH)
+          }
+        } else if (match($0, /"content"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+          t = substr($0, RSTART, RLENGTH)
+          gsub(/"content"[[:space:]]*:[[:space:]]*"/, "", t)
+          gsub(/"$/, "", t)
+          if (t != "") print t
+        }
+      }
+    }
+  ' "$transcript" 2>/dev/null | sort -u | tr '\n' ' '
+}
+
 # 从 stdin JSON 提取 transcript 路径和最后一条消息
-# 简单 JSON 解析（不依赖 python3）
-transcript=$(echo "$input" | sed -n 's/.*"transcript_path"\s*:\s*"\([^"]*\)".*/\1/p')
-last_msg=$(echo "$input" | sed -n 's/.*"last_assistant_message"\s*:\s*"\([^"]*\)".*/\1/p')
+transcript=$(json_value "transcript_path")
+last_msg=$(json_value "last_assistant_message")
 
 all_text="$last_msg"
 
@@ -23,40 +110,8 @@ if [[ -n "$transcript" && -f "$transcript" ]]; then
   # 计算 30 秒前的时间戳（毫秒）
   cutoff=$(($(date +%s) * 1000 - 30000))
 
-  # 用 awk 解析 JSON lines，提取 role=assistant 且 timestamp > cutoff 的 text
-  extra=$(awk -v cutoff="$cutoff" '
-    {
-      # 提取 timestamp
-      if (match($0, /"timestamp"\s*:\s*[0-9]+/)) {
-        ts = substr($0, RSTART, RLENGTH)
-        gsub(/[^0-9]/, "", ts)
-        ts = int(ts)
-        if (ts < cutoff) next
-      }
-
-      # 提取 role
-      if (match($0, /"role"\s*:\s*"assistant"/)) {
-        # 提取 content（可能是字符串或数组）
-        if (match($0, /"content"\s*:\s*\[/)) {
-          # 数组形式，提取所有 text 字段
-          gsub(/[^{]*\[/, "", $0)
-          gsub(/\].*/, "", $0)
-          while (match($0, /"text"\s*:\s*"[^"]*"/)) {
-            t = substr($0, RSTART, RLENGTH)
-            gsub(/"text"\s*:\s*"/, "", t)
-            gsub(/"$/, "", t)
-            if (t != "") print t
-            $0 = substr($0, RSTART + RLENGTH)
-          }
-        } else if (match($0, /"content"\s*:\s*"\([^"]*\)"/)) {
-          t = substr($0, RSTART, RLENGTH)
-          gsub(/"content"\s*:\s*"/, "", t)
-          gsub(/"$/, "", t)
-          if (t != "") print t
-        }
-      }
-    }
-  ' "$transcript" 2>/dev/null | sort -u | tr '\n' ' ')
+  # 优先用 JSON parser，Node 不存在时回退到简易 awk。
+  extra=$(extract_recent_assistant_text "$transcript" "$cutoff")
 
   if [[ -n "$extra" ]]; then
     all_text="$extra"

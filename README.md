@@ -1,6 +1,6 @@
 # iSpeak
 
-![Version](https://img.shields.io/badge/version-1.6.1-blue)
+![Version](https://img.shields.io/badge/version-1.6.2-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.26-blue)](https://golang.org/dl/)
 ![Platform](https://img.shields.io/badge/platform-macOS-green)
@@ -51,11 +51,12 @@ brew install ffmpeg
 git clone https://github.com/xdfnet/iSpeak.git && cd iSpeak && make install
 ```
 
-安装时手动输入 API Key，然后验证：
+安装后编辑 API Key，然后验证：
 
 ```bash
+open ~/.config/iSpeak/config.json
 ispeak status
-ispeak test "iSpeak 准备好了"
+ispeak "iSpeak 准备好了"
 ```
 
 ## 工作原理
