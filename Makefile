@@ -1,6 +1,7 @@
-.PHONY: build install deploy uninstall clean help
+.PHONY: build test pack push install deploy uninstall clean help
 
 VERSION  := 1.6.3
+TAG      := v$(VERSION)
 BIN     := build/ispeakd
 BIN_DIR := $(HOME)/.local/bin
 DST     := $(BIN_DIR)/ispeakd
@@ -12,6 +13,8 @@ help:
 	@echo "iSpeak $(VERSION)"
 	@echo ""
 	@echo "  make build      # 编译 ispeakd"
+	@echo "  make test       # 运行 Go 测试、race 测试、构建、npm 打包预检"
+	@echo "  make push       # 推送 GitHub tag 并发布 npm latest"
 	@echo "  make install    # 安装并启动服务（首次运行会部署配置和 hook）"
 	@echo "  make deploy     # 同 install"
 	@echo "  make uninstall  # 卸载（停止服务 + 删除文件）"
@@ -21,6 +24,35 @@ build:
 	@mkdir -p build
 	@go build -ldflags="-s -w" -o $(BIN) .
 	@echo "编译完成: $(BIN)"
+
+test:
+	@go test -count=1 ./...
+	@go test -race -count=1 ./...
+	@go build ./...
+	@npm pack --dry-run
+
+pack:
+	@npm pack --dry-run
+
+push: test
+	@if [ -n "$$(git status --porcelain)" ]; then \
+		echo "工作区不干净，请先提交或暂存改动"; \
+		git status --short; \
+		exit 1; \
+	fi
+	@if git rev-parse "$(TAG)" >/dev/null 2>&1; then \
+		echo "tag 已存在: $(TAG)"; \
+	else \
+		git tag "$(TAG)"; \
+	fi
+	@if npm view @xdfnet/ispeak@$(VERSION) version >/dev/null 2>&1; then \
+		echo "npm 版本已存在: @xdfnet/ispeak@$(VERSION)"; \
+		exit 1; \
+	fi
+	@git push origin HEAD
+	@git push origin "$(TAG)"
+	@npm publish --access public
+	@echo "已发布: @xdfnet/ispeak@$(VERSION) / $(TAG)"
 
 install: build
 	@# 停止旧服务
