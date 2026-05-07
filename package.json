@@ -1,6 +1,6 @@
 {
   "name": "@xdfnet/ispeak",
-  "version": "1.6.2",
+  "version": "1.6.3",
   "description": "Local macOS TTS daemon for AI coding assistants, powered by Volcengine streaming TTS.",
   "license": "MIT",
   "homepage": "https://github.com/xdfnet/iSpeak#readme",

@@ -1,6 +1,6 @@
 .PHONY: build install deploy uninstall clean help
 
-VERSION  := 1.6.2
+VERSION  := 1.6.3
 BIN     := build/ispeakd
 BIN_DIR := $(HOME)/.local/bin
 DST     := $(BIN_DIR)/ispeakd
