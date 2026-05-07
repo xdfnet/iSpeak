@@ -40,7 +40,7 @@ func TestSubmitClearsPendingSynthOnly(t *testing.T) {
 	}
 }
 
-func TestSpeakRetryThenDeleteOnSynthesisFailure(t *testing.T) {
+func TestSpeakDeletesOnSynthesisFailureWithoutRetry(t *testing.T) {
 	e := NewTaskEngine()
 	var mu sync.Mutex
 	calls := 0
@@ -66,12 +66,12 @@ func TestSpeakRetryThenDeleteOnSynthesisFailure(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if calls != 2 {
-		t.Fatalf("expected synth attempts=2, got %d", calls)
+	if calls != 1 {
+		t.Fatalf("expected synth attempts=1, got %d", calls)
 	}
 }
 
-func TestSpeakRetryThenDeleteOnPlayerWriteFailure(t *testing.T) {
+func TestSpeakDeletesOnPlayerWriteFailureWithoutRetry(t *testing.T) {
 	e := NewTaskEngine()
 	e.synthesizeStreamFn = func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {
 		return onAudio([]byte("audio"))
@@ -99,22 +99,22 @@ func TestSpeakRetryThenDeleteOnPlayerWriteFailure(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if calls != 2 {
-		t.Fatalf("expected player attempts=2, got %d", calls)
+	if calls != 1 {
+		t.Fatalf("expected player attempts=1, got %d", calls)
 	}
 }
 
-func TestSubmitDoesNotInterruptSpeakingTask(t *testing.T) {
+func TestSubmitInterruptsSpeakingTask(t *testing.T) {
 	e := NewTaskEngine()
 	start := make(chan struct{}, 1)
-	release := make(chan struct{})
 	var mu sync.Mutex
 	processed := make([]string, 0, 2)
 
 	e.synthesizeStreamFn = func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {
 		if text == "a" {
 			start <- struct{}{}
-			<-release
+			<-ctx.Done()
+			return ctx.Err()
 		}
 		mu.Lock()
 		processed = append(processed, text)
@@ -129,7 +129,6 @@ func TestSubmitDoesNotInterruptSpeakingTask(t *testing.T) {
 	e.Submit("a", voice, cfg)
 	<-start // a 已进入 speaking
 	e.Submit("b", voice, cfg)
-	close(release)
 
 	waitFor(t, 3*time.Second, func() bool {
 		e.mu.Lock()
@@ -139,8 +138,76 @@ func TestSubmitDoesNotInterruptSpeakingTask(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(processed) != 2 || processed[0] != "a" || processed[1] != "b" {
-		t.Fatalf("expected processed [a b], got %#v", processed)
+	if len(processed) != 1 || processed[0] != "b" {
+		t.Fatalf("expected processed [b], got %#v", processed)
+	}
+}
+
+func TestClaimedStaleTaskIsSkippedBeforeSynthesis(t *testing.T) {
+	e := NewTaskEngine()
+	calls := 0
+	e.synthesizeStreamFn = func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {
+		calls++
+		return onAudio([]byte(text))
+	}
+	e.newStreamPlayerFn = newFakeStreamPlayerFactory()
+
+	cfg := Config{}
+	voice := VoiceInfo{VoiceType: "v", ResourceID: "r"}
+	firstID := e.Submit("a", voice, cfg)
+	claimedID := e.claimPendingSynth()
+	if claimedID != firstID {
+		t.Fatalf("expected claimed first task %d, got %d", firstID, claimedID)
+	}
+	e.Submit("b", voice, cfg)
+
+	e.processSpeakTask(firstID)
+
+	if calls != 0 {
+		t.Fatalf("expected stale task skipped before synthesis, got calls=%d", calls)
+	}
+	e.mu.Lock()
+	_, firstExists := e.tasks[firstID]
+	e.mu.Unlock()
+	if firstExists {
+		t.Fatalf("expected stale task deleted")
+	}
+}
+
+func TestSubmitInterruptsPlaybackTask(t *testing.T) {
+	e := NewTaskEngine()
+	playbackStarted := make(chan struct{}, 1)
+	firstPlayer := &fakeStreamPlayer{closeBlock: make(chan struct{}), closeStarted: playbackStarted}
+	var mu sync.Mutex
+	playerCalls := 0
+	e.newStreamPlayerFn = func() (StreamPlayer, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		playerCalls++
+		if playerCalls == 1 {
+			return firstPlayer, nil
+		}
+		return &fakeStreamPlayer{}, nil
+	}
+	e.synthesizeStreamFn = func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {
+		if err := onAudio([]byte(text)); err != nil {
+			return err
+		}
+		return ctx.Err()
+	}
+	e.Start()
+
+	cfg := Config{}
+	voice := VoiceInfo{VoiceType: "v", ResourceID: "r"}
+	firstID := e.Submit("a", voice, cfg)
+	<-playbackStarted
+	secondID := e.Submit("b", voice, cfg)
+
+	waitForTaskDeleted(t, e, firstID)
+	waitForTaskDeleted(t, e, secondID)
+
+	if !firstPlayer.aborted {
+		t.Fatalf("expected first player aborted")
 	}
 }
 
@@ -271,6 +338,9 @@ type fakeStreamPlayer struct {
 	chunks       [][]byte
 	aborted      bool
 	closed       bool
+	closeBlock   chan struct{}
+	closeStarted chan struct{}
+	closeOnce    sync.Once
 }
 
 func newFakeStreamPlayerFactory() func() (StreamPlayer, error) {
@@ -292,6 +362,12 @@ func (p *fakeStreamPlayer) Write(audio []byte) error {
 
 func (p *fakeStreamPlayer) CloseAndWait() error {
 	p.closed = true
+	if p.closeStarted != nil {
+		p.closeStarted <- struct{}{}
+	}
+	if p.closeBlock != nil {
+		<-p.closeBlock
+	}
 	if p.closeErr {
 		return errors.New("close failed")
 	}
@@ -300,6 +376,11 @@ func (p *fakeStreamPlayer) CloseAndWait() error {
 
 func (p *fakeStreamPlayer) Abort() error {
 	p.aborted = true
+	if p.closeBlock != nil {
+		p.closeOnce.Do(func() {
+			close(p.closeBlock)
+		})
+	}
 	return nil
 }
 

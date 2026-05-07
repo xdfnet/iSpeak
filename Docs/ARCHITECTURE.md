@@ -34,7 +34,7 @@ iSpeak 是一个运行在 macOS 上的本地 TTS 播报守护进程，通过 Uni
 │             ▼                                               │
 │  Speak Worker (single)                                      │
 │  - pending_synth -> speaking                                │
-│  - 调用 TTS 流式接口（失败重试1次）                          │
+│  - 调用 TTS 流式接口（失败直接删除，不重试）                  │
 │  - SSE audio chunk -> StreamPlayer.Write                    │
 │  - 播放完成后删除任务；连续失败删除任务                       │
 │                                                             │
@@ -107,12 +107,14 @@ pending_synth -> speaking -> delete
 
 `Submit(cleanedText, voice, cfg)` 原子执行：
 1. 删除所有 `pending_synth` 任务
-2. 创建新任务（`pending_synth`）
-3. 唤醒 speak worker
+2. 打断当前 `speaking` 任务（取消合成/停止播放）
+3. 创建新任务（`pending_synth`）
+4. 唤醒 speak worker
 
 策略说明：
-- 只清理“未开始合成”的任务
-- 不打断 `speaking`
+- 未开始合成的旧任务直接删除
+- 已领取但过期的旧任务在合成前跳过
+- 正在合成/播放的旧任务会被新消息取消
 
 ### Speak worker 规则
 
@@ -151,9 +153,9 @@ pending_synth -> speaking -> delete
 
 ## 失败与成本策略
 
-- 新任务到达时仅清理 `pending_synth`，避免无效合成
-- 流式合成/播放失败：整条播报重试 1 次后删除
-- 执行中任务不打断，行为稳定、可预期
+- 新任务到达时清理 `pending_synth` 并打断当前任务，避免无效合成/播放
+- 流式合成/播放失败：直接删除任务，不重试，避免重复播报
+- 只保留最新消息优先播报，降低 TTS 成本
 
 ## 文件布局
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-iSpeak — 字节跳动 TTS 本地播报服务。守护进程 `ispeakd` 监听 Unix Socket，接收文本后调用火山引擎 TTS API，生成音频并按任务流水线顺序播放。
+iSpeak — 字节跳动 TTS 本地播报服务。守护进程 `ispeakd` 监听 Unix Socket，接收文本后调用火山引擎 TTS 流式 API，边合成边播放。
 
 ## 常用命令
 
@@ -24,13 +24,10 @@ ispeak (CLI, bash)
   └─ nc -U ~/.config/iSpeak/ispeak.sock
       └─ ispeakd (Go daemon)
            ├─ Task Engine (任务仓库)
-           │    ├─ pendingSynth FIFO
-           │    └─ pendingPlay FIFO
-           ├─ synthWorker (single)
-           │    └─ pending_synth -> synthesizing -> pending_play
-           └─ playWorker (single)
-                └─ pending_play -> playing -> delete
-                     └─ 常驻播放器子进程（命令/回执协议）
+           │    └─ pendingSynth FIFO
+           └─ speakWorker (single)
+                └─ pending_synth -> speaking -> delete
+                     └─ SSE audio chunk -> ffplay stdin
 ```
 
 - **Socket**: `~/.config/iSpeak/ispeak.sock`
@@ -40,7 +37,7 @@ ispeak (CLI, bash)
 
 ## 核心文件
 
-- `main.go` — 守护进程、任务引擎、TTS 请求、SSE 解析、播放子进程协议
+- `main.go` — 守护进程、任务引擎、TTS 流式请求、SSE 解析、流式播放
 - `main_test.go` — 任务引擎关键行为测试
 - `scripts/ispeak` — CLI 入口，通过 nc 发送文本到 socket
 - `configs/hook-speak.sh` — Claude/Codex Stop Hook，纯 bash 实现
@@ -59,18 +56,18 @@ CLI 与 daemon 通过 socket 传输原始文本，支持音色前缀：
 
 新消息到达时：
 1. 删除所有 `pending_synth` 任务（未开始合成）
-2. 创建新任务并进入 `pending_synth`
-3. 不打断 `synthesizing` 和 `playing` 任务
+2. 打断当前 `speaking` 任务（取消合成/停止播放）
+3. 创建新任务并进入 `pending_synth`
 
 **任务状态流转：**
 ```
-pending_synth → synthesizing → pending_play → playing → delete
+pending_synth → speaking → delete
 ```
 
 ## 失败策略
 
-- 合成失败：重试 1 次，仍失败删除任务
-- 播放失败：重试 1 次，仍失败删除任务
+- 合成失败：直接删除任务，不重试
+- 播放失败：直接删除任务，不重试
 
 ## 配置
 
@@ -90,7 +87,7 @@ pending_synth → synthesizing → pending_play → playing → delete
 
 ## 稳定性设计
 
-- 单合成 worker + 单播放 worker，降低并发复杂度
+- 单 speak worker，合成与播放同链路，降低首播延迟
 - 关键 goroutine 有 `panic recover`
 - 配置热更新（mtime 缓存 + 自动重载）
 - TTS HTTP Client 复用，减少连接开销

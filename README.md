@@ -89,6 +89,8 @@ ispeak "iSpeak 准备好了"
 pending_synth → speaking → delete
 ```
 
+新消息到达时会清理未开始任务，并打断当前合成/播放，只保留最新消息优先播报。
+
 ## 全部命令
 
 ```bash

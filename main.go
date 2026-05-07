@@ -25,11 +25,6 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-const (
-	ttsMaxAttempts  = 2
-	ttsRetryBackoff = 400 * time.Millisecond
-)
-
 var configDir = os.ExpandEnv("$HOME/.config/iSpeak")
 
 var (
@@ -54,9 +49,13 @@ type StreamPlayer interface {
 }
 
 type ffplayStreamPlayer struct {
-	path  string
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
+	path string
+	cmd  *exec.Cmd
+
+	mu       sync.Mutex
+	stdin    io.WriteCloser
+	waitOnce sync.Once
+	waitErr  error
 }
 
 func newDefaultStreamPlayer() (StreamPlayer, error) {
@@ -99,35 +98,55 @@ func (p *ffplayStreamPlayer) Write(audio []byte) error {
 	if len(audio) == 0 {
 		return nil
 	}
-	if _, err := p.stdin.Write(audio); err != nil {
+	p.mu.Lock()
+	stdin := p.stdin
+	p.mu.Unlock()
+	if stdin == nil {
+		return fmt.Errorf("播放器输入已关闭")
+	}
+	if _, err := stdin.Write(audio); err != nil {
 		return fmt.Errorf("写入播放器失败: %w", err)
 	}
 	return nil
 }
 
 func (p *ffplayStreamPlayer) CloseAndWait() error {
-	if p.stdin != nil {
-		if err := p.stdin.Close(); err != nil {
+	p.mu.Lock()
+	stdin := p.stdin
+	p.stdin = nil
+	p.mu.Unlock()
+	if stdin != nil {
+		if err := stdin.Close(); err != nil {
 			return fmt.Errorf("关闭播放器输入失败: %w", err)
 		}
-		p.stdin = nil
 	}
-	if err := p.cmd.Wait(); err != nil {
+	if err := p.wait(); err != nil {
 		return fmt.Errorf("ffplay failed: %w", err)
 	}
 	return nil
 }
 
 func (p *ffplayStreamPlayer) Abort() error {
-	if p.stdin != nil {
-		_ = p.stdin.Close()
-		p.stdin = nil
+	p.mu.Lock()
+	stdin := p.stdin
+	p.stdin = nil
+	p.mu.Unlock()
+	if stdin != nil {
+		_ = stdin.Close()
 	}
 	if p.cmd != nil && p.cmd.Process != nil {
 		_ = p.cmd.Process.Kill()
-		_ = p.cmd.Wait()
 	}
-	return nil
+	return p.wait()
+}
+
+func (p *ffplayStreamPlayer) wait() error {
+	p.waitOnce.Do(func() {
+		if p.cmd != nil {
+			p.waitErr = p.cmd.Wait()
+		}
+	})
+	return p.waitErr
 }
 
 type bufferedStreamPlayer struct {
@@ -183,8 +202,11 @@ type TaskEngine struct {
 	mu sync.Mutex
 
 	nextID       uint64
+	latestID     uint64
 	tasks        map[uint64]*Task
 	pendingSynth []uint64
+	activeID     uint64
+	activeCancel context.CancelFunc
 
 	synthWake chan struct{}
 
@@ -207,7 +229,6 @@ func (e *TaskEngine) Start() {
 
 func (e *TaskEngine) Submit(text string, voice VoiceInfo, cfg Config) uint64 {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
 	// 新任务进来先删所有未开始合成任务
 	for _, id := range e.pendingSynth {
@@ -215,6 +236,12 @@ func (e *TaskEngine) Submit(text string, voice VoiceInfo, cfg Config) uint64 {
 		log.Printf("删除待合成任务: id=%d", id)
 	}
 	e.pendingSynth = e.pendingSynth[:0]
+
+	cancelActive := e.activeCancel
+	activeID := e.activeID
+	if activeID != 0 {
+		log.Printf("打断当前播报任务: id=%d", activeID)
+	}
 
 	e.nextID++
 	task := &Task{
@@ -225,10 +252,16 @@ func (e *TaskEngine) Submit(text string, voice VoiceInfo, cfg Config) uint64 {
 		Cfg:    cfg,
 	}
 	e.tasks[task.ID] = task
+	e.latestID = task.ID
 	e.pendingSynth = append(e.pendingSynth, task.ID)
 	log.Printf("任务创建: id=%d text=%s", task.ID, text)
 
 	notify(e.synthWake)
+	e.mu.Unlock()
+
+	if cancelActive != nil {
+		cancelActive()
+	}
 	return task.ID
 }
 
@@ -252,24 +285,27 @@ func (e *TaskEngine) processSpeakTask(id uint64) {
 		}
 	}()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	e.setActiveTask(id, cancel)
+	defer e.clearActiveTask(id)
+
 	task, ok := e.getTask(id)
 	if !ok {
 		return
 	}
-
-	var lastErr error
-	for i := 1; i <= ttsMaxAttempts; i++ {
-		lastErr = e.speakOnce(context.Background(), task)
-		if lastErr == nil {
-			break
-		}
-		if i < ttsMaxAttempts {
-			time.Sleep(ttsRetryBackoff)
-		}
+	if !e.isLatestTask(id) {
+		cancel()
+		log.Printf("跳过过期播报任务: id=%d", id)
+		e.deleteTask(id)
+		return
 	}
 
-	if lastErr != nil {
-		log.Printf("播报失败并删除任务: id=%d err=%v", id, lastErr)
+	if err := e.speakOnce(ctx, task); err != nil {
+		if errors.Is(err, context.Canceled) {
+			log.Printf("播报已打断并删除任务: id=%d", id)
+		} else {
+			log.Printf("播报失败并删除任务: id=%d err=%v", id, err)
+		}
 		e.deleteTask(id)
 		return
 	}
@@ -299,9 +335,21 @@ func (e *TaskEngine) speakOnce(ctx context.Context, task *Task) error {
 		return err
 	}
 	log.Printf("TTS 流结束: id=%d elapsed=%s", task.ID, time.Since(startedAt).Round(time.Millisecond))
-	if err := player.CloseAndWait(); err != nil {
+
+	done := make(chan error, 1)
+	go func() {
+		done <- player.CloseAndWait()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			_ = player.Abort()
+			return err
+		}
+	case <-ctx.Done():
 		_ = player.Abort()
-		return err
+		<-done
+		return ctx.Err()
 	}
 	return nil
 }
@@ -342,6 +390,28 @@ func (e *TaskEngine) deleteTask(id uint64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.tasks, id)
+}
+
+func (e *TaskEngine) setActiveTask(id uint64, cancel context.CancelFunc) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.activeID = id
+	e.activeCancel = cancel
+}
+
+func (e *TaskEngine) clearActiveTask(id uint64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.activeID == id {
+		e.activeID = 0
+		e.activeCancel = nil
+	}
+}
+
+func (e *TaskEngine) isLatestTask(id uint64) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.latestID == id
 }
 
 func notify(ch chan struct{}) {
