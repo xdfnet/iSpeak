@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stop Hook: 从 transcript 文件中提取本次会话所有 Claude 回复文本
+# Stop Hook: 只播报本次停止时的最后一条 assistant 回复
 # iAgent 调用 Claude 时设 ISPEAK_SKIP=1，此时跳过（iAgent 自己播）
 [[ "$ISPEAK_SKIP" == "1" ]] && exit 0
 
@@ -32,87 +32,79 @@ json_value() {
   printf "%s" "$input" | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
 }
 
-extract_recent_assistant_text() {
+extract_last_assistant_text() {
   local transcript="$1"
-  local cutoff="$2"
 
   if command -v node >/dev/null 2>&1; then
     node -e '
       const fs = require("fs");
       const file = process.argv[1];
-      const cutoff = Number(process.argv[2]);
-      const out = [];
+      let last = "";
 
       function collectText(content) {
+        const out = [];
         if (typeof content === "string") {
-          out.push(content);
-          return;
+          return content;
         }
-        if (!Array.isArray(content)) return;
+        if (!Array.isArray(content)) return "";
         for (const item of content) {
           if (item && typeof item.text === "string") out.push(item.text);
         }
+        return out.join(" ");
       }
 
       for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line);
-          if (typeof event.timestamp === "number" && event.timestamp < cutoff) continue;
-          if (event.role === "assistant") collectText(event.content);
-          if (event.message && event.message.role === "assistant") collectText(event.message.content);
+          if (event.role === "assistant") last = collectText(event.content) || last;
+          if (event.message && event.message.role === "assistant") last = collectText(event.message.content) || last;
         } catch (_) {}
       }
-      process.stdout.write([...new Set(out.filter(Boolean))].join(" "));
-    ' "$transcript" "$cutoff" 2>/dev/null
+      process.stdout.write(last);
+    ' "$transcript" 2>/dev/null
     return
   fi
 
-  awk -v cutoff="$cutoff" '
+  awk '
     {
-      if (match($0, /"timestamp"[[:space:]]*:[[:space:]]*[0-9]+/)) {
-        ts = substr($0, RSTART, RLENGTH)
-        gsub(/[^0-9]/, "", ts)
-        ts = int(ts)
-        if (ts < cutoff) next
-      }
-
       if (match($0, /"role"[[:space:]]*:[[:space:]]*"assistant"/)) {
         if (match($0, /"content"[[:space:]]*:[[:space:]]*\[/)) {
           gsub(/[^{]*\[/, "", $0)
           gsub(/\].*/, "", $0)
+          msg = ""
           while (match($0, /"text"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
             t = substr($0, RSTART, RLENGTH)
             gsub(/"text"[[:space:]]*:[[:space:]]*"/, "", t)
             gsub(/"$/, "", t)
-            if (t != "") print t
+            if (t != "") msg = msg " " t
             $0 = substr($0, RSTART + RLENGTH)
           }
+          if (msg != "") last = msg
         } else if (match($0, /"content"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
           t = substr($0, RSTART, RLENGTH)
           gsub(/"content"[[:space:]]*:[[:space:]]*"/, "", t)
           gsub(/"$/, "", t)
-          if (t != "") print t
+          if (t != "") last = t
         }
       }
     }
-  ' "$transcript" 2>/dev/null | sort -u | tr '\n' ' '
+    END {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", last)
+      if (last != "") print last
+    }
+  ' "$transcript" 2>/dev/null
 }
 
-# 从 stdin JSON 提取 transcript 路径和最后一条消息
+# 从 stdin JSON 提取最后一条消息；没有时再从 transcript 取最后一条 assistant
 transcript=$(json_value "transcript_path")
 last_msg=$(json_value "last_assistant_message")
 
 all_text="$last_msg"
 
-# 如果有 transcript 文件，提取最近 30 秒内的所有 assistant 消息
-if [[ -n "$transcript" && -f "$transcript" ]]; then
-  # 计算 30 秒前的时间戳（毫秒）
-  cutoff=$(($(date +%s) * 1000 - 30000))
-
-  # 优先用 JSON parser，Node 不存在时回退到简易 awk。
-  extra=$(extract_recent_assistant_text "$transcript" "$cutoff")
-
+# Claude Code 部分版本不提供 last_assistant_message，此时只取 transcript 最后一条 assistant。
+if [[ -z "$all_text" && -n "$transcript" && -f "$transcript" ]]; then
+  extra=$(extract_last_assistant_text "$transcript")
   if [[ -n "$extra" ]]; then
     all_text="$extra"
   fi

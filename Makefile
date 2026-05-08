@@ -71,14 +71,14 @@ install: build
 	else \
 		echo "配置文件已存在: $(CONFIG)/config.json"; \
 	fi
-	@# 部署 hook 脚本（首次不覆盖已有）
-	@if [ ! -f $(CONFIG)/hook-speak.sh ]; then \
-		cp configs/hook-speak.sh $(CONFIG)/hook-speak.sh; \
-		chmod +x $(CONFIG)/hook-speak.sh; \
-		echo "Hook 脚本已创建: $(CONFIG)/hook-speak.sh"; \
-	else \
-		echo "Hook 脚本已存在: $(CONFIG)/hook-speak.sh"; \
+	@# 部署 hook 脚本（覆盖安装；如有本地改动先备份）
+	@if [ -f $(CONFIG)/hook-speak.sh ] && ! cmp -s configs/hook-speak.sh $(CONFIG)/hook-speak.sh; then \
+		cp $(CONFIG)/hook-speak.sh $(CONFIG)/hook-speak.sh.bak; \
+		echo "旧 Hook 已备份: $(CONFIG)/hook-speak.sh.bak"; \
 	fi
+	@cp configs/hook-speak.sh $(CONFIG)/hook-speak.sh
+	@chmod +x $(CONFIG)/hook-speak.sh
+	@echo "Hook 脚本已安装: $(CONFIG)/hook-speak.sh"
 	@# 安装 launchd plist
 	@sed 's|BINARY_PATH_PLACEHOLDER|$(DST)|' configs/com.iSpeak.plist > $(PLIST)
 	@# 启动
