@@ -26,8 +26,8 @@ ispeak-codex "构建完成，耗时 12 秒"
 
 | 问题 | 方案 |
 |------|------|
-| AI 生成多条回复，TTS 账单飞涨 | 新消息只保留最新待合成任务，避免无效合成 |
-| 回复快慢不一，音频播报乱序 | 单 speak worker，FIFO 顺序稳定 |
+| AI 生成多条回复，TTS 账单飞涨 | 新消息只保留最新待执行任务，避免无效合成 |
+| 回复快慢不一，音频播报乱序 | 单 transaction worker，FIFO 顺序稳定 |
 | 修改配置要重启服务 | 热更新：编辑 `config.json` 立即生效 |
 | 默认音色太无聊 | 来源专属音色，Claude 和 Codex 声音不同 |
 
@@ -72,7 +72,7 @@ ispeak "iSpeak 准备好了"
 │         │                                            │
 │         ▼                                           │
 │   任务引擎                                           │
-│   （pending_synth → speaking → delete）              │
+│   （pending → running → delete）              │
 │         │                                            │
 │         ▼                                           │
 │   单 Worker 流式链路                                 │
@@ -86,10 +86,10 @@ ispeak "iSpeak 准备好了"
 
 **任务状态流转：**
 ```
-pending_synth → speaking → delete
+pending → running → delete
 ```
 
-新消息到达时会清理未开始任务，并打断当前合成/播放，只保留最新消息优先播报。
+新消息到达时只清理未开始任务，不打断当前合成/播放；当前事务结束后再播最新消息。
 
 ## 语音清洗规则
 

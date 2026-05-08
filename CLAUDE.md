@@ -24,9 +24,9 @@ ispeak (CLI, bash)
   └─ nc -U ~/.config/iSpeak/ispeak.sock
       └─ ispeakd (Go daemon)
            ├─ Task Engine (任务仓库)
-           │    └─ pendingSynth FIFO
-           └─ speakWorker (single)
-                └─ pending_synth -> speaking -> delete
+           │    └─ pending FIFO
+           └─ transactionWorker (single)
+                └─ pending -> running -> delete
                      └─ SSE audio chunk -> ffplay stdin
 ```
 
@@ -52,16 +52,16 @@ CLI 与 daemon 通过 socket 传输原始文本，支持音色前缀：
 文本                 → 使用默认音色
 ```
 
-## 任务与打断策略（节省 TTS 费用）
+## 任务策略（节省 TTS 费用）
 
 新消息到达时：
-1. 删除所有 `pending_synth` 任务（未开始合成）
-2. 打断当前 `speaking` 任务（取消合成/停止播放）
-3. 创建新任务并进入 `pending_synth`
+1. 删除所有 `pending` 任务（未开始）
+2. 不打断当前 `running` 事务
+3. 创建新任务并进入 `pending`
 
 **任务状态流转：**
 ```
-pending_synth → speaking → delete
+pending → running → delete
 ```
 
 ## 失败策略
@@ -87,7 +87,7 @@ pending_synth → speaking → delete
 
 ## 稳定性设计
 
-- 单 speak worker，合成与播放同链路，降低首播延迟
+- 单 transaction worker，合成与播放同链路，降低首播延迟
 - 关键 goroutine 有 `panic recover`
 - 配置热更新（mtime 缓存 + 自动重载）
 - TTS HTTP Client 复用，减少连接开销

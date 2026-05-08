@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-func TestSubmitClearsPendingSynthOnly(t *testing.T) {
+func TestSubmitClearsPendingOnly(t *testing.T) {
 	e := NewTaskEngine()
 	e.synthesizeStreamFn = func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {
 		return onAudio([]byte("ok"))
@@ -27,10 +27,10 @@ func TestSubmitClearsPendingSynthOnly(t *testing.T) {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if len(e.pendingSynth) != 1 {
-		t.Fatalf("expected 1 pending synth, got %d", len(e.pendingSynth))
+	if len(e.pending) != 1 {
+		t.Fatalf("expected 1 pending, got %d", len(e.pending))
 	}
-	id := e.pendingSynth[0]
+	id := e.pending[0]
 	task, ok := e.tasks[id]
 	if !ok {
 		t.Fatalf("expected pending task exists")
@@ -40,7 +40,7 @@ func TestSubmitClearsPendingSynthOnly(t *testing.T) {
 	}
 }
 
-func TestSpeakDeletesOnSynthesisFailureWithoutRetry(t *testing.T) {
+func TestTransactionDeletesOnSynthesisFailureWithoutRetry(t *testing.T) {
 	e := NewTaskEngine()
 	var mu sync.Mutex
 	calls := 0
@@ -71,7 +71,7 @@ func TestSpeakDeletesOnSynthesisFailureWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestSpeakDeletesOnPlayerWriteFailureWithoutRetry(t *testing.T) {
+func TestTransactionDeletesOnPlayerWriteFailureWithoutRetry(t *testing.T) {
 	e := NewTaskEngine()
 	e.synthesizeStreamFn = func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {
 		return onAudio([]byte("audio"))
@@ -104,17 +104,19 @@ func TestSpeakDeletesOnPlayerWriteFailureWithoutRetry(t *testing.T) {
 	}
 }
 
-func TestSubmitInterruptsSpeakingTask(t *testing.T) {
+func TestSubmitDoesNotInterruptRunningTask(t *testing.T) {
 	e := NewTaskEngine()
 	start := make(chan struct{}, 1)
+	release := make(chan struct{})
 	var mu sync.Mutex
 	processed := make([]string, 0, 2)
 
 	e.synthesizeStreamFn = func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {
 		if text == "a" {
 			start <- struct{}{}
-			<-ctx.Done()
-			return ctx.Err()
+		}
+		if text == "a" {
+			<-release
 		}
 		mu.Lock()
 		processed = append(processed, text)
@@ -127,8 +129,16 @@ func TestSubmitInterruptsSpeakingTask(t *testing.T) {
 	cfg := Config{}
 	voice := VoiceInfo{VoiceType: "v", ResourceID: "r"}
 	e.Submit("a", voice, cfg)
-	<-start // a 已进入 speaking
-	e.Submit("b", voice, cfg)
+	<-start // a 已进入 running
+	secondID := e.Submit("b", voice, cfg)
+
+	e.mu.Lock()
+	if len(e.pending) != 1 || e.pending[0] != secondID {
+		t.Fatalf("expected second task pending while first keeps running, got %#v", e.pending)
+	}
+	e.mu.Unlock()
+
+	close(release)
 
 	waitFor(t, 3*time.Second, func() bool {
 		e.mu.Lock()
@@ -138,12 +148,12 @@ func TestSubmitInterruptsSpeakingTask(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(processed) != 1 || processed[0] != "b" {
-		t.Fatalf("expected processed [b], got %#v", processed)
+	if strings.Join(processed, "") != "ab" {
+		t.Fatalf("expected processed [a b], got %#v", processed)
 	}
 }
 
-func TestClaimedStaleTaskIsSkippedBeforeSynthesis(t *testing.T) {
+func TestClaimedStaleTaskIsSkippedBeforeTransaction(t *testing.T) {
 	e := NewTaskEngine()
 	calls := 0
 	e.synthesizeStreamFn = func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {
@@ -155,59 +165,22 @@ func TestClaimedStaleTaskIsSkippedBeforeSynthesis(t *testing.T) {
 	cfg := Config{}
 	voice := VoiceInfo{VoiceType: "v", ResourceID: "r"}
 	firstID := e.Submit("a", voice, cfg)
-	claimedID := e.claimPendingSynth()
+	claimedID := e.claimPending()
 	if claimedID != firstID {
 		t.Fatalf("expected claimed first task %d, got %d", firstID, claimedID)
 	}
 	e.Submit("b", voice, cfg)
 
-	e.processSpeakTask(firstID)
+	e.processTransaction(firstID)
 
 	if calls != 0 {
-		t.Fatalf("expected stale task skipped before synthesis, got calls=%d", calls)
+		t.Fatalf("expected stale task skipped before transaction, got calls=%d", calls)
 	}
 	e.mu.Lock()
 	_, firstExists := e.tasks[firstID]
 	e.mu.Unlock()
 	if firstExists {
 		t.Fatalf("expected stale task deleted")
-	}
-}
-
-func TestSubmitInterruptsPlaybackTask(t *testing.T) {
-	e := NewTaskEngine()
-	playbackStarted := make(chan struct{}, 1)
-	firstPlayer := &fakeStreamPlayer{closeBlock: make(chan struct{}), closeStarted: playbackStarted}
-	var mu sync.Mutex
-	playerCalls := 0
-	e.newStreamPlayerFn = func() (StreamPlayer, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		playerCalls++
-		if playerCalls == 1 {
-			return firstPlayer, nil
-		}
-		return &fakeStreamPlayer{}, nil
-	}
-	e.synthesizeStreamFn = func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {
-		if err := onAudio([]byte(text)); err != nil {
-			return err
-		}
-		return ctx.Err()
-	}
-	e.Start()
-
-	cfg := Config{}
-	voice := VoiceInfo{VoiceType: "v", ResourceID: "r"}
-	firstID := e.Submit("a", voice, cfg)
-	<-playbackStarted
-	secondID := e.Submit("b", voice, cfg)
-
-	waitForTaskDeleted(t, e, firstID)
-	waitForTaskDeleted(t, e, secondID)
-
-	if !firstPlayer.aborted {
-		t.Fatalf("expected first player aborted")
 	}
 }
 
@@ -510,10 +483,10 @@ func TestHandleConnectionPreservesMultilineBeforeCleaning(t *testing.T) {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if len(e.pendingSynth) != 1 {
-		t.Fatalf("expected one pending task, got %d", len(e.pendingSynth))
+	if len(e.pending) != 1 {
+		t.Fatalf("expected one pending task, got %d", len(e.pending))
 	}
-	task := e.tasks[e.pendingSynth[0]]
+	task := e.tasks[e.pending[0]]
 	if !strings.Contains(task.Text, "不是，飞哥。") ||
 		!strings.Contains(task.Text, "也就是说：daemon 常驻，播放器不是常驻。") {
 		t.Fatalf("expected surrounding text preserved, got %q", task.Text)

@@ -200,12 +200,12 @@ func (p *bufferedStreamPlayer) Abort() error {
 }
 
 // 任务状态
-// 生命周期：pending_synth -> speaking -> delete
+// 生命周期：pending -> running -> delete
 type TaskStatus int
 
 const (
-	TaskStatusPendingSynth TaskStatus = iota
-	TaskStatusSpeaking
+	TaskStatusPending TaskStatus = iota
+	TaskStatusRunning
 )
 
 // 单个 TTS 任务
@@ -217,18 +217,16 @@ type Task struct {
 	Cfg    Config
 }
 
-// 任务引擎：任务仓库 + 单流式合成播放 worker
+// 任务引擎：任务仓库 + 单事务 worker
 type TaskEngine struct {
 	mu sync.Mutex
 
-	nextID       uint64
-	latestID     uint64
-	tasks        map[uint64]*Task
-	pendingSynth []uint64
-	activeID     uint64
-	activeCancel context.CancelFunc
+	nextID   uint64
+	latestID uint64
+	tasks    map[uint64]*Task
+	pending  []uint64
 
-	synthWake chan struct{}
+	wake chan struct{}
 
 	synthesizeStreamFn func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error
 	newStreamPlayerFn  func() (StreamPlayer, error)
@@ -237,67 +235,58 @@ type TaskEngine struct {
 func NewTaskEngine() *TaskEngine {
 	return &TaskEngine{
 		tasks:              make(map[uint64]*Task),
-		synthWake:          make(chan struct{}, 1),
+		wake:               make(chan struct{}, 1),
 		synthesizeStreamFn: synthesizeStream,
 		newStreamPlayerFn:  newDefaultStreamPlayer,
 	}
 }
 
 func (e *TaskEngine) Start() {
-	go e.speakWorker()
+	go e.transactionWorker()
 }
 
 func (e *TaskEngine) Submit(text string, voice VoiceInfo, cfg Config) uint64 {
 	e.mu.Lock()
 
-	// 新任务进来先删所有未开始合成任务
-	for _, id := range e.pendingSynth {
+	// 新任务进来先删所有未开始的任务。
+	for _, id := range e.pending {
 		delete(e.tasks, id)
-		log.Printf("删除待合成任务: id=%d", id)
+		log.Printf("删除待执行任务: id=%d", id)
 	}
-	e.pendingSynth = e.pendingSynth[:0]
-
-	cancelActive := e.activeCancel
-	activeID := e.activeID
-	if activeID != 0 {
-		log.Printf("打断当前播报任务: id=%d", activeID)
-	}
+	e.pending = e.pending[:0]
 
 	e.nextID++
 	task := &Task{
 		ID:     e.nextID,
 		Text:   text,
-		Status: TaskStatusPendingSynth,
+		Status: TaskStatusPending,
 		Voice:  voice,
 		Cfg:    cfg,
 	}
 	e.tasks[task.ID] = task
 	e.latestID = task.ID
-	e.pendingSynth = append(e.pendingSynth, task.ID)
+	e.pending = append(e.pending, task.ID)
 	log.Printf("任务创建: id=%d text=%s", task.ID, text)
 
-	notify(e.synthWake)
+	notify(e.wake)
 	e.mu.Unlock()
 
-	if cancelActive != nil {
-		cancelActive()
-	}
 	return task.ID
 }
 
-func (e *TaskEngine) speakWorker() {
+func (e *TaskEngine) transactionWorker() {
 	for {
-		id := e.claimPendingSynth()
+		id := e.claimPending()
 		if id == 0 {
-			<-e.synthWake
+			<-e.wake
 			continue
 		}
 
-		e.processSpeakTask(id)
+		e.processTransaction(id)
 	}
 }
 
-func (e *TaskEngine) processSpeakTask(id uint64) {
+func (e *TaskEngine) processTransaction(id uint64) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("播报任务崩溃并删除: id=%d err=%v", id, r)
@@ -305,27 +294,18 @@ func (e *TaskEngine) processSpeakTask(id uint64) {
 		}
 	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	e.setActiveTask(id, cancel)
-	defer e.clearActiveTask(id)
-
 	task, ok := e.getTask(id)
 	if !ok {
 		return
 	}
 	if !e.isLatestTask(id) {
-		cancel()
 		log.Printf("跳过过期播报任务: id=%d", id)
 		e.deleteTask(id)
 		return
 	}
 
-	if err := e.speakOnce(ctx, task); err != nil {
-		if errors.Is(err, context.Canceled) {
-			log.Printf("播报已打断并删除任务: id=%d", id)
-		} else {
-			log.Printf("播报失败并删除任务: id=%d err=%v", id, err)
-		}
+	if err := e.runTransaction(task); err != nil {
+		log.Printf("播报失败并删除任务: id=%d err=%v", id, err)
 		e.deleteTask(id)
 		return
 	}
@@ -334,7 +314,7 @@ func (e *TaskEngine) processSpeakTask(id uint64) {
 	e.deleteTask(id)
 }
 
-func (e *TaskEngine) speakOnce(ctx context.Context, task *Task) error {
+func (e *TaskEngine) runTransaction(task *Task) error {
 	startedAt := time.Now()
 	player, err := e.newStreamPlayerFn()
 	if err != nil {
@@ -350,45 +330,34 @@ func (e *TaskEngine) speakOnce(ctx context.Context, task *Task) error {
 		return player.Write(audio)
 	}
 
-	if err := e.synthesizeStreamFn(ctx, task.Cfg, task.Text, &task.Voice, onAudio); err != nil {
+	if err := e.synthesizeStreamFn(context.Background(), task.Cfg, task.Text, &task.Voice, onAudio); err != nil {
 		_ = player.Abort()
 		return err
 	}
 	log.Printf("TTS 流结束: id=%d elapsed=%s", task.ID, time.Since(startedAt).Round(time.Millisecond))
 
-	done := make(chan error, 1)
-	go func() {
-		done <- player.CloseAndWait()
-	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			_ = player.Abort()
-			return err
-		}
-	case <-ctx.Done():
+	if err := player.CloseAndWait(); err != nil {
 		_ = player.Abort()
-		<-done
-		return ctx.Err()
+		return err
 	}
 	return nil
 }
 
-func (e *TaskEngine) claimPendingSynth() uint64 {
+func (e *TaskEngine) claimPending() uint64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	for len(e.pendingSynth) > 0 {
-		id := e.pendingSynth[0]
-		e.pendingSynth = e.pendingSynth[1:]
+	for len(e.pending) > 0 {
+		id := e.pending[0]
+		e.pending = e.pending[1:]
 		task, ok := e.tasks[id]
 		if !ok {
 			continue
 		}
-		if task.Status != TaskStatusPendingSynth {
+		if task.Status != TaskStatusPending {
 			continue
 		}
-		task.Status = TaskStatusSpeaking
+		task.Status = TaskStatusRunning
 		return id
 	}
 	return 0
@@ -410,22 +379,6 @@ func (e *TaskEngine) deleteTask(id uint64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	delete(e.tasks, id)
-}
-
-func (e *TaskEngine) setActiveTask(id uint64, cancel context.CancelFunc) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.activeID = id
-	e.activeCancel = cancel
-}
-
-func (e *TaskEngine) clearActiveTask(id uint64) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.activeID == id {
-		e.activeID = 0
-		e.activeCancel = nil
-	}
 }
 
 func (e *TaskEngine) isLatestTask(id uint64) bool {
