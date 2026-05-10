@@ -61,6 +61,43 @@ function copyIfMissing(src, dst, mode) {
   console.log(`配置文件已创建: ${dst}`);
 }
 
+function migrateDefaultEndpoint(configPath) {
+  if (!fs.existsSync(configPath)) {
+    return;
+  }
+  const oldEndpoint = "https://openspeech.bytedance.com/api/v3/tts/unidirectional";
+  const newEndpoint = "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse";
+  let config;
+  try {
+    config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  } catch (_) {
+    return;
+  }
+  if (config.endpoint !== oldEndpoint) {
+    return;
+  }
+  fs.copyFileSync(configPath, `${configPath}.bak`);
+  config.endpoint = newEndpoint;
+  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+  console.log(`配置 endpoint 已迁移到 SSE，旧配置备份: ${configPath}.bak`);
+}
+
+function installHook(src, dst) {
+  if (fs.existsSync(dst)) {
+    try {
+      if (fs.readFileSync(src, "utf8") !== fs.readFileSync(dst, "utf8")) {
+        fs.copyFileSync(dst, `${dst}.bak`);
+        console.log(`旧 Hook 已备份: ${dst}.bak`);
+      }
+    } catch (_) {
+      fs.copyFileSync(dst, `${dst}.bak`);
+      console.log(`旧 Hook 已备份: ${dst}.bak`);
+    }
+  }
+  copyExecutable(src, dst);
+  console.log(`Hook 脚本已安装: ${dst}`);
+}
+
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -106,8 +143,10 @@ function main() {
   symlinkForce(cliPath, path.join(binDir, "ispeak-claude"));
   symlinkForce(cliPath, path.join(binDir, "ispeak-codex"));
 
-  copyIfMissing(path.join(root, "configs", "config.example.json"), path.join(configDir, "config.json"));
-  copyIfMissing(path.join(root, "configs", "hook-speak.sh"), path.join(configDir, "hook-speak.sh"), 0o755);
+  const configPath = path.join(configDir, "config.json");
+  copyIfMissing(path.join(root, "configs", "config.example.json"), configPath);
+  migrateDefaultEndpoint(configPath);
+  installHook(path.join(root, "configs", "hook-speak.sh"), path.join(configDir, "hook-speak.sh"));
 
   const plist = fs
     .readFileSync(path.join(root, "configs", "com.iSpeak.plist"), "utf8")

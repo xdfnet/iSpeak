@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net"
 	"os"
@@ -248,6 +249,39 @@ func TestParseSSEStreamWritesChunksInOrder(t *testing.T) {
 	}
 }
 
+func TestParseSSEStreamHandlesLargeAudioLine(t *testing.T) {
+	payload := strings.Repeat("a", 300*1024)
+	encoded := base64.StdEncoding.EncodeToString([]byte(payload))
+	stream := strings.NewReader("data: {\"audio\":\"" + encoded + "\"}\n\n")
+
+	var got []byte
+	err := parseSSEStream(stream, func(audio []byte) error {
+		got = append(got, audio...)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("parse stream: %v", err)
+	}
+	if string(got) != payload {
+		t.Fatalf("expected large payload preserved, got len=%d", len(got))
+	}
+}
+
+func TestParseSSEStreamReturnsTTSFailureMessage(t *testing.T) {
+	stream := strings.NewReader("event: 153\ndata: {\"code\":55001307,\"message\":\"voice clone failed\",\"data\":null}\n\n")
+
+	err := parseSSEStream(stream, func(audio []byte) error {
+		t.Fatalf("unexpected audio callback")
+		return nil
+	})
+	if err == nil {
+		t.Fatalf("expected tts failure")
+	}
+	if !strings.Contains(err.Error(), "55001307") || !strings.Contains(err.Error(), "voice clone failed") {
+		t.Fatalf("expected code and message in error, got %v", err)
+	}
+}
+
 func TestCleanTextRemovesSpeechNoise(t *testing.T) {
 	input := strings.Join([]string{
 		"## 结果",
@@ -408,6 +442,20 @@ func TestCleanTextKeepsChinesePercentConclusion(t *testing.T) {
 	}
 	if !strings.Contains(got, "测试通过率 95%，可以发布。") {
 		t.Fatalf("expected Chinese percent conclusion preserved, got %q", got)
+	}
+}
+
+func TestCleanTextKeepsPlainPercentLine(t *testing.T) {
+	got := cleanText("覆盖率 95%")
+	if !strings.Contains(got, "覆盖率 95%") {
+		t.Fatalf("expected plain percent line preserved, got %q", got)
+	}
+}
+
+func TestCleanTextKeepsOrdinaryFileReferenceLine(t *testing.T) {
+	got := cleanText("已更新 main.go 和 README.md。")
+	if !strings.Contains(got, "main.go") || !strings.Contains(got, "README.md") {
+		t.Fatalf("expected ordinary file references preserved, got %q", got)
 	}
 }
 

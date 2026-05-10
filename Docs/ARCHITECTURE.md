@@ -177,7 +177,7 @@ pending -> running -> delete
 ├── config.json      # API Key、音色配置
 ├── ispeak.sock      # Unix Socket
 ├── ispeak.log       # 日志（lumberjack 轮转）
-└── hook-speak.sh    # Claude/Codex Stop Hook
+└── hook-speak.sh    # Claude/Codex Hook
 
 ~/Library/LaunchAgents/
 └── com.iSpeak.plist # launchd 服务配置

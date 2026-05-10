@@ -38,9 +38,10 @@ ispeak (CLI, bash)
 ## 核心文件
 
 - `main.go` — 守护进程、任务引擎、TTS 流式请求、SSE 解析、流式播放
+- `clean_text.go` — TTS 播报文本清洗
 - `main_test.go` — 任务引擎关键行为测试
 - `scripts/ispeak` — CLI 入口，通过 nc 发送文本到 socket
-- `configs/hook-speak.sh` — Claude/Codex Stop Hook，纯 bash 实现
+- `configs/hook-speak.sh` — Claude/Codex Hook，bash + Node 解析输入
 
 ## 消息格式
 
@@ -76,7 +77,7 @@ pending → running → delete
 ```json
 {
   "apiKey": "...",
-  "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
+  "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse",
   "defaultVoice": { "voice_type": "zh_female_mizai_uranus_bigtts", "resourceId": "seed-tts-2.0" },
   "sourceVoices": {
     "claude": { "voice_type": "zh_female_tianmeitaozi_uranus_bigtts", "resourceId": "seed-tts-2.0" },

@@ -1,0 +1,61 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+HOOK="$ROOT/configs/hook-speak.sh"
+
+assert_stdin_extracts() {
+  local name="$1"
+  local source="$2"
+  local input="$3"
+  local want="$4"
+  local got
+
+  got=$(printf "%s" "$input" | ISPEAK_HOOK_PRINT_TEXT=1 bash "$HOOK" "$source")
+  if [[ "$got" != "$want" ]]; then
+    echo "hook fixture failed: $name" >&2
+    echo "want: $want" >&2
+    echo "got:  $got" >&2
+    exit 1
+  fi
+}
+
+assert_arg_extracts() {
+  local name="$1"
+  local source="$2"
+  local input="$3"
+  local want="$4"
+  local got
+
+  got=$(ISPEAK_HOOK_PRINT_TEXT=1 bash "$HOOK" "$source" "$input")
+  if [[ "$got" != "$want" ]]; then
+    echo "hook fixture failed: $name" >&2
+    echo "want: $want" >&2
+    echo "got:  $got" >&2
+    exit 1
+  fi
+}
+
+assert_stdin_extracts "claude direct field" claude \
+  '{"last_assistant_message":"Claude 直接字段"}' \
+  "Claude 直接字段"
+
+assert_arg_extracts "codex notify argv field" codex \
+  '{"last-assistant-message":"Codex 横杠字段"}' \
+  "Codex 横杠字段"
+
+assert_stdin_extracts "codex stop stdin field" codex \
+  '{"last_assistant_message":"Codex Stop 字段"}' \
+  "Codex Stop 字段"
+
+transcript="$(mktemp)"
+trap 'rm -f "$transcript"' EXIT
+printf '%s\n' \
+  '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Codex transcript 字段"}]}}' \
+  > "$transcript"
+
+assert_stdin_extracts "codex transcript fallback" codex \
+  "{\"transcript_path\":\"$transcript\"}" \
+  "Codex transcript 字段"
+
+echo "hook fixtures passed"

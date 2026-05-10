@@ -1,13 +1,13 @@
 # iSpeak
 
-![Version](https://img.shields.io/badge/version-1.6.3-blue)
+![Version](https://img.shields.io/badge/version-1.6.6-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.26-blue)](https://golang.org/dl/)
 ![Platform](https://img.shields.io/badge/platform-macOS-green)
 
 iSpeak 让 AI 编程助手开口说话。你写代码，它播结果——眼睛休息，耳朵来听。
 
-适合 Claude Code 或 Codex 常驻后台的开发者。AI 完成任务后自动播报；你发新消息时，旧播报立即中断，不花冤枉钱。
+适合 Claude Code 或 Codex 常驻后台的开发者。AI 完成任务后自动播报；你发新消息时，未开始的旧播报会被丢弃，不花冤枉钱。
 
 ## 效果示例
 
@@ -104,8 +104,7 @@ pending → running → delete
 - Markdown 链接：只保留链接标题，不播 URL
 - 绝对路径：简化为“路径”
 - 长 commit hash、UUID、长 ID：不播
-- 明显文件列表：如模型分片、代码文件列表、下载文件清单
-- 下载进度和终端噪声：百分比、速度、进度条、ANSI 控制符
+- 下载进度噪声：速度、ETA、预计剩余时间、ANSI 控制符
 
 保留优先级：结论、成功/失败状态、需要用户操作的下一步、关键错误原因。
 
@@ -131,7 +130,7 @@ ispeak-codex "消息"    # Codex 专属音色
 ```json
 {
   "apiKey": "你的火山引擎 API Key",
-  "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
+  "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse",
   "defaultVoice": {
     "voice_type": "zh_female_mizai_uranus_bigtts",
     "resourceId": "seed-tts-2.0"
@@ -173,7 +172,13 @@ ispeak-codex "消息"    # Codex 专属音色
 
 ### Codex
 
-在 `~/.codex/hooks.json` 中添加 Stop Hook：
+推荐在 `~/.codex/config.toml` 中添加回合结束通知：
+
+```toml
+notify = ["bash", "/Users/你的用户名/.config/iSpeak/hook-speak.sh", "codex"]
+```
+
+如果你启用了 Codex hooks，也可以在 `~/.codex/hooks.json` 中添加 Stop Hook：
 
 ```json
 {

@@ -1,6 +1,6 @@
 {
   "apiKey": "your-api-key",
-  "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional",
+  "endpoint": "https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse",
   "defaultVoice": {
     "voice_type": "zh_female_mizai_uranus_bigtts",
     "resourceId": "seed-tts-2.0"

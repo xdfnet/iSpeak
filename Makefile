@@ -1,6 +1,6 @@
 .PHONY: build test pack push install deploy uninstall clean help
 
-VERSION  := 1.6.5
+VERSION  := 1.6.6
 TAG      := v$(VERSION)
 BIN     := build/ispeakd
 BIN_DIR := $(HOME)/.local/bin
@@ -29,6 +29,7 @@ test:
 	@go test -count=1 ./...
 	@go test -race -count=1 ./...
 	@go build ./...
+	@bash scripts/test-hook-speak
 	@npm pack --dry-run
 
 pack:
@@ -70,6 +71,11 @@ install: build
 		echo "配置文件已创建: $(CONFIG)/config.json"; \
 	else \
 		echo "配置文件已存在: $(CONFIG)/config.json"; \
+	fi
+	@if grep -q '"endpoint"[[:space:]]*:[[:space:]]*"https://openspeech.bytedance.com/api/v3/tts/unidirectional"' $(CONFIG)/config.json; then \
+		cp $(CONFIG)/config.json $(CONFIG)/config.json.bak; \
+		perl -pi -e 's|"https://openspeech.bytedance.com/api/v3/tts/unidirectional"|"https://openspeech.bytedance.com/api/v3/tts/unidirectional/sse"|g' $(CONFIG)/config.json; \
+		echo "配置 endpoint 已迁移到 SSE，旧配置备份: $(CONFIG)/config.json.bak"; \
 	fi
 	@# 部署 hook 脚本（覆盖安装；如有本地改动先备份）
 	@if [ -f $(CONFIG)/hook-speak.sh ] && ! cmp -s configs/hook-speak.sh $(CONFIG)/hook-speak.sh; then \

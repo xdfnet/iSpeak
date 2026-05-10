@@ -1,6 +1,6 @@
 {
   "name": "@xdfnet/ispeak",
-  "version": "1.6.5",
+  "version": "1.6.6",
   "description": "Local macOS TTS daemon for AI coding assistants, powered by Volcengine streaming TTS.",
   "license": "MIT",
   "homepage": "https://github.com/xdfnet/iSpeak#readme",
@@ -26,14 +26,16 @@
   "scripts": {
     "build": "go build -ldflags=\"-s -w\" -o build/ispeakd .",
     "test": "go test ./...",
+    "prepublishOnly": "make test",
     "postinstall": "node npm/postinstall.js",
     "pack:dry-run": "npm pack --dry-run"
   },
   "files": [
     "main.go",
+    "clean_text.go",
     "go.mod",
     "go.sum",
-    "scripts/",
+    "scripts/ispeak",
     "configs/",
     "npm/",
     "Docs/",
