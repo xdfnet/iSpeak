@@ -1,6 +1,6 @@
 .PHONY: build test pack release push install deploy uninstall clean help
 
-VERSION  := 1.7.0
+VERSION  := $(shell grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' package.json | head -1 | sed 's/.*: *"\(.*\)"/\1/')
 TAG      := v$(VERSION)
 NPM_PKG  := @xdfnet/ispeak
 BIN     := build/ispeakd

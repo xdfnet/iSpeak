@@ -43,7 +43,30 @@ ispeak (CLI, bash)
 - `main.go` — 守护进程、Player (channel 驱动)、TTS 流式请求、SSE 解析
 - `avaudioengine_player_darwin.go` — macOS 原生 `AVAudioEngine` PCM 播放器
 - `clean_text.go` — TTS 播报文本清洗
-- `main_test.go` — 任务引擎关键行为测试
+- `main_test.go` — 测试套件
+
+## 发布指南
+
+```bash
+# 1. 改版本号（唯一需要改的地方）
+#    编辑 package.json → "version": "x.y.z"
+
+# 2. 更新 README badge（跟一下即可）
+#    README.md → version-x.y.z-blue
+
+# 3. 提交并发布
+git add -A && git commit -m "release: vx.y.z — <简述>"
+make release
+```
+
+`make release` 会自动：
+- 运行测试（含 race + hook fixtures）
+- 检查工作区是否干净
+- 检查 npm 版本是否已存在
+- 创建 git tag 并推送
+- 发布 npm 包
+
+Makefile 和 `scripts/ispeak` 自动从 `package.json` 读取版本号，无需手动同步。
 - `scripts/ispeak` — CLI 入口，通过 nc 发送文本到 socket
 - `configs/hook-speak.sh` — Claude/Codex Hook，bash + Node 解析输入
 
