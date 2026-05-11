@@ -252,12 +252,6 @@ func (p *avAudioEngineStreamPlayer) CloseAndWait() error {
 	return p.closeLocked()
 }
 
-func (p *avAudioEngineStreamPlayer) Abort() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.closeLocked()
-}
-
 func (p *avAudioEngineStreamPlayer) writeChunk(data []byte) error {
 	if len(data) == 0 {
 		return nil

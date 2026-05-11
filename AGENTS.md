@@ -28,11 +28,9 @@ make help       # 显示帮助
 ispeak (CLI, bash)
   └─ nc -U ~/.config/iSpeak/ispeak.sock
       └─ ispeakd (Go daemon)
-           ├─ Task Engine (任务仓库)
-           │    └─ pending FIFO
-           └─ transactionWorker (single)
-                └─ pending -> running -> delete
-                     └─ SSE PCM chunk -> AVAudioEngine
+           └─ Player (channel, buffer=1)
+                └─ loop goroutine: 单 AVAudioEngine 实例复用
+                     └─ SSE PCM chunk → AVAudioEngine
 ```
 
 - **Socket**: `~/.config/iSpeak/ispeak.sock`
@@ -42,7 +40,7 @@ ispeak (CLI, bash)
 
 ## 核心文件
 
-- `main.go` — 守护进程、任务引擎、TTS 流式请求、SSE 解析、流式播放
+- `main.go` — 守护进程、Player (channel 驱动)、TTS 流式请求、SSE 解析
 - `avaudioengine_player_darwin.go` — macOS 原生 `AVAudioEngine` PCM 播放器
 - `clean_text.go` — TTS 播报文本清洗
 - `main_test.go` — 任务引擎关键行为测试
@@ -62,18 +60,13 @@ CLI 与 daemon 通过 socket 传输原始文本，支持音色前缀：
 ## 任务策略（节省 TTS 费用）
 
 新消息到达时：
-1. 删除所有 `pending` 任务（未开始）
-2. 不打断当前 `running` 事务
-3. 创建新任务并进入 `pending`
-
-**任务状态流转：**
-```
-pending → running → delete
-```
+1. 丢弃 channel 中排队的旧消息
+2. 不打断当前正在合成/播放的任务
+3. 新消息入队
 
 ## 失败策略
 
-- 流式合成/播放失败：直接删除任务，不重试，避免重复播报
+- 流式合成/播放失败：日志记录，继续处理下一条，不重试
 
 ## 配置
 
@@ -93,11 +86,11 @@ pending → running → delete
 
 ## 稳定性设计
 
-- 单 transaction worker，合成与播放同链路，降低首播延迟
-- 关键 goroutine 有 `panic recover`
+- 单 Player goroutine，合成与播放同链路，降低首播延迟
+- AVAudioEngine 实例复用，避免重复初始化开销
+- Channel buffer=1 + drain，新消息自动丢弃旧排队消息
 - 配置热更新（mtime 缓存 + 自动重载）
 - TTS HTTP Client 复用，减少连接开销
 - 主链路使用 macOS 原生 `AVAudioEngine` 播放 PCM
-- 播放失败直接删除任务，不重试
+- 合成/播放失败直接跳过，不重试
 - 日志轮转，防止文件过大
-- 进程级 temp 目录，退出时自动清理

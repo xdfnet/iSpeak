@@ -1,6 +1,6 @@
 .PHONY: build test pack release push install deploy uninstall clean help
 
-VERSION  := 1.6.9
+VERSION  := 1.6.16
 TAG      := v$(VERSION)
 NPM_PKG  := @xdfnet/ispeak
 BIN     := build/ispeakd

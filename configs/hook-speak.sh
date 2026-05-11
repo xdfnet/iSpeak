@@ -17,7 +17,7 @@ input_file=$(mktemp)
 trap 'rm -f "$input_file"' EXIT
 printf "%s" "$input" > "$input_file"
 
-result=$(SOURCE="$SOURCE" HOOK_INPUT_FILE="$input_file" node <<'NODE' 2>/dev/null
+result=$(HOOK_INPUT_FILE="$input_file" node <<'NODE' 2>>"$LOG"
 const fs = require("fs");
 
 (() => {
@@ -26,7 +26,6 @@ const fs = require("fs");
 
   const text = payload.last_assistant_message
     || payload["last-assistant-message"]
-    || payload.message
     || "";
 
   if (text) process.stdout.write(text);

@@ -40,7 +40,6 @@ var errAlreadyRunning = errors.New("iSpeak already running")
 type StreamPlayer interface {
 	Write(audio []byte) error
 	CloseAndWait() error
-	Abort() error
 }
 
 // 最简单的播放器：channel 队列，串行播报
@@ -55,25 +54,31 @@ type job struct {
 }
 
 func NewPlayer() *Player {
-	p := &Player{ch: make(chan job, 256)}
+	p := &Player{ch: make(chan job, 1)}
 	go p.loop()
 	return p
 }
 
 func (p *Player) Submit(text string, voice VoiceInfo, cfg Config) {
 	log.Printf("TTS: %s", text)
+	// 丢弃队列中的旧消息，只保留最新
+	select {
+	case <-p.ch:
+	default:
+	}
 	p.ch <- job{text, voice, cfg}
 }
 
 func (p *Player) loop() {
+	player, err := newDefaultStreamPlayer()
+	if err != nil {
+		log.Printf("启动播放器失败: %v", err)
+		return
+	}
+	defer player.CloseAndWait()
+
 	for j := range p.ch {
-		player, err := newDefaultStreamPlayer()
-		if err != nil {
-			log.Printf("启动播放器失败: %v", err)
-			continue
-		}
 		p.play(j, player)
-		_ = player.CloseAndWait()
 	}
 }
 
@@ -231,35 +236,13 @@ func synthesizeStream(ctx context.Context, cfg Config, text string, voice *Voice
 		return fmt.Errorf("http request: %w", err)
 	}
 	if resp.StatusCode != 200 {
-		io.Copy(io.Discard, resp.Body) // 消费 body 以释放连接
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 		return fmt.Errorf("http status %d", resp.StatusCode)
 	}
 	defer resp.Body.Close()
 
 	return parseSSEStream(resp.Body, onAudio)
-}
-
-// 解析 SSE 流，提取 base64 音频数据
-func parseSSE(r io.Reader) ([]byte, error) {
-	var chunks [][]byte
-	if err := parseSSEStream(r, func(audio []byte) error {
-		chunk := append([]byte(nil), audio...)
-		chunks = append(chunks, chunk)
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-
-	total := 0
-	for _, c := range chunks {
-		total += len(c)
-	}
-	result := make([]byte, 0, total)
-	for _, c := range chunks {
-		result = append(result, c...)
-	}
-	return result, nil
 }
 
 func parseSSEStream(r io.Reader, onAudio func([]byte) error) error {
