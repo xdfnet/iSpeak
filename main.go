@@ -47,81 +47,51 @@ type StreamPlayer interface {
 	Abort() error
 }
 
-// 单播放器：新的打断旧的，不用队列
+// 最简单的播放器：channel 队列，串行播报
 type Player struct {
-	mu        sync.Mutex
-	gen       int64
-	currentGen int64
-	player    StreamPlayer
+	ch chan job
+}
+
+type job struct {
+	text  string
+	voice VoiceInfo
+	cfg   Config
 }
 
 func NewPlayer() *Player {
-	return &Player{}
+	p := &Player{ch: make(chan job, 256)}
+	go p.loop()
+	return p
 }
 
 func (p *Player) Submit(text string, voice VoiceInfo, cfg Config) {
-	p.mu.Lock()
-	p.gen++
-	currentGen := p.gen
-	p.player = nil
+	log.Printf("TTS: %s", text)
+	p.ch <- job{text, voice, cfg}
+}
 
-	player, err := newDefaultStreamPlayer()
-	if err != nil {
-		log.Printf("启动播放器失败: %v", err)
-		p.mu.Unlock()
+func (p *Player) loop() {
+	for j := range p.ch {
+		player, err := newDefaultStreamPlayer()
+		if err != nil {
+			log.Printf("启动播放器失败: %v", err)
+			continue
+		}
+		p.play(j, player)
+		_ = player.CloseAndWait()
+	}
+}
+
+func (p *Player) play(j job, player StreamPlayer) {
+	startedAt := time.Now()
+	onAudio := func(audio []byte) error {
+		return player.Write(audio)
+	}
+
+	if err := synthesizeStream(context.Background(), j.cfg, j.text, &j.voice, onAudio); err != nil {
+		log.Printf("TTS 合成失败: %v", err)
 		return
 	}
-	p.player = player
-	log.Printf("TTS: %s", text)
-
-	startedAt := time.Now()
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("播报崩溃: %v", r)
-			}
-		}()
-
-		onAudio := func(audio []byte) error {
-			p.mu.Lock()
-			stale := currentGen != p.gen
-			p.mu.Unlock()
-			if stale {
-				return errors.New("stale")
-			}
-			if err := player.Write(audio); err != nil {
-				return err
-			}
-			if len(audio) > 0 {
-				log.Printf("首个音频 chunk elapsed=%s bytes=%d", time.Since(startedAt).Round(time.Millisecond), len(audio))
-			}
-			return nil
-		}
-
-		if err := synthesizeStream(context.Background(), cfg, text, &voice, onAudio); err != nil {
-			if !strings.Contains(err.Error(), "stale") {
-				log.Printf("TTS 合成失败: %v", err)
-			}
-			_ = player.Abort()
-			p.mu.Lock()
-			if p.player == player {
-				p.player = nil
-			}
-			p.mu.Unlock()
-			return
-		}
-
-		log.Printf("TTS 流结束 elapsed=%s", time.Since(startedAt).Round(time.Millisecond))
-		if err := player.CloseAndWait(); err != nil {
-			log.Printf("播放器失败: %v", err)
-		}
-		p.mu.Lock()
-		if p.player == player {
-			p.player = nil
-		}
-		p.mu.Unlock()
-	}()
-	p.mu.Unlock()
+	log.Printf("TTS: 完成 elapsed=%s", time.Since(startedAt).Round(time.Millisecond))
 }
 
 // 音色信息
