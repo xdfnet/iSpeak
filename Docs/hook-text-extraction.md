@@ -6,9 +6,9 @@
 
 推荐优先级：
 
-1. **Codex `notify`**：从脚本第二个参数 `$2` 读取 JSON，取 `last-assistant-message`。
-2. **Claude / Codex Stop Hook**：从 stdin 读取 JSON，优先取 `last_assistant_message`。
-3. **明确 transcript**：如果没有直接字段，只读取 payload 里明确传入的 `transcript_path`。
+1. **Codex `notify`**：从脚本第二个参数 `$2` 读取 JSON，取 `last-assistant-message`（kebab-case）。
+2. **Codex Stop Hook**：从 stdin 读取 JSON，取 `last_assistant_message`（snake_case）。
+3. **Claude Code Stop Hook**：从 stdin 读取 JSON，只读 `transcript_path`（官方无 direct 字段）。
 
 不扫描 `~/.codex/sessions`。没有 direct 字段也没有 `transcript_path` 时，本次不播报。
 
@@ -61,7 +61,7 @@ input="${2:-}"
 payload["last-assistant-message"]
 ```
 
-源码依据：`codex-rs/hooks/src/legacy_notify.rs`。该文件把 `last_assistant_message` 序列化为 kebab-case 的 `last-assistant-message`，并在执行命令前 `command.arg(notify_payload)`。
+源码依据：`codex-rs/hooks/src/legacy_notify.rs`（https://github.com/openai/codex，2026-05-11）。该文件把 `last_assistant_message` 序列化为 kebab-case 的 `last-assistant-message`，并在执行命令前 `command.arg(notify_payload)`。
 
 ## Codex CLI：Stop Hook
 
@@ -95,7 +95,23 @@ $2 = empty
 stdin = '{"hook_event_name":"Stop",...,"last_assistant_message":"..."}'
 ```
 
-核心字段：
+核心字段（源码 `StopCommandInput` struct）：
+
+```rust
+struct StopCommandInput {
+    session_id: String,
+    turn_id: String,
+    transcript_path: NullableString,
+    cwd: String,
+    hook_event_name: String,
+    model: String,
+    permission_mode: String,
+    stop_hook_active: bool,
+    last_assistant_message: NullableString,  // ← Codex 有此字段
+}
+```
+
+对应 JSON：
 
 ```json
 {
@@ -113,9 +129,8 @@ stdin = '{"hook_event_name":"Stop",...,"last_assistant_message":"..."}'
 
 源码依据：
 
-- `codex-rs/hooks/src/events/stop.rs`：构造 `StopCommandInput`，包含 `last_assistant_message` 和 `transcript_path`。
-- `codex-rs/hooks/schema/generated/stop.command.input.schema.json`：Stop stdin schema。
-- `codex-rs/hooks/src/engine/command_runner.rs`：Hook 命令通过 stdin 接收 `input_json`。
+- `codex-rs/hooks/src/events/stop.rs`（https://github.com/openai/codex，2026-05-11）：构造 `StopCommandInput`，包含 `last_assistant_message` 和 `transcript_path`。
+- `codex-rs/hooks/src/engine/command_runner.rs`（同上）：Hook 命令通过 stdin 接收 `input_json`。
 
 ## Codex Transcript
 
@@ -153,30 +168,35 @@ event.payload.content[].text
 
 ## Claude Code：Stop Hook
 
-Claude Code 官方 Stop Hook 通过 stdin 传 JSON，核心字段是：
+> **来源**：[Claude Code Hooks Reference](https://code.claude.com/docs/en/hooks.md)，更新时间：2026-05-11
+
+Claude Code 官方 Stop Hook **没有 `last_assistant_message` 字段**。
+
+根据官方文档，Stop Hook 的 Common Input Fields 为：
 
 ```json
 {
-  "session_id": "...",
-  "transcript_path": "...",
+  "session_id": "abc123",
+  "transcript_path": "/home/user/.claude/projects/.../transcript.jsonl",
+  "cwd": "/home/user/my-project",
+  "permission_mode": "default",
   "hook_event_name": "Stop",
-  "stop_hook_active": false
+  "effort": {
+    "level": "medium"
+  }
 }
 ```
 
-有些版本或场景可能直接提供：
+子 agent 上下文中额外字段：
 
 ```json
 {
-  "last_assistant_message": "最后一条 assistant 回复"
+  "agent_id": "subagent_xyz",
+  "agent_type": "Explore"
 }
 ```
 
-所以 Claude 的读取顺序是：
-
-1. `last_assistant_message`
-2. `message`
-3. `transcript_path`
+**结论**：Claude Code Stop Hook 官方设计只提供 `transcript_path`，没有直接内嵌 `last_assistant_message`。旧版本脚本的 `last_assistant_message` / `message` fallback 实际上**从未被官方文档支持**。
 
 Claude transcript 常见 assistant 形态：
 
@@ -207,11 +227,11 @@ fi
 - Claude / Codex Stop Hook：读 stdin
 - 如果 Codex 的 `notify` 和 `Stop` 同时启用，脚本会按 `turn_id` 去重，避免同一回合播两次
 
-Codex 文本字段优先级：
+Codex 文本字段优先级（源码确认）：
 
 ```js
-payload["last-assistant-message"]
-payload.last_assistant_message
+payload["last-assistant-message"]  // notify: kebab-case
+payload.last_assistant_message      // Stop Hook: snake_case
 payload.lastAssistantMessage
 payload.message
 payload.lastMessage
@@ -220,14 +240,13 @@ payload.transcriptPath
 payload["transcript-path"]
 ```
 
-Claude 文本字段优先级：
+Claude Code 文本字段优先级（官方文档）：
 
 ```js
-payload.last_assistant_message
-payload.message
-payload.transcript_path
-payload.transcriptPath
+payload.transcript_path  // 官方支持的唯一方式
 ```
+
+> **注**：Claude Code Stop Hook 官方 payload 中**没有 `last_assistant_message` 字段**，这是与 Codex 的本质区别。
 
 ## 为什么不能只读 stdin
 
@@ -239,3 +258,17 @@ SPOKE: SKIP
 ```
 
 正确做法是先读 `$2`，再读 stdin；不扫历史 session。
+
+## Claude Code TEXT_LEN: 0 的根因
+
+当 Claude Code Stop Hook 触发但 `TEXT_LEN: 0` 时：
+
+1. **官方字段不存在**：Claude Code Stop Hook 官方 payload 中**没有 `last_assistant_message` 字段**，只有 `transcript_path`
+2. **transcript 文件可能晚一点才写完**：Hook 触发时文件虽已存在，但最后一条 assistant 文本还没落盘
+3. **结果**：如果只读一次，`hook-speak.sh` 可能拿到空串，本次不播报
+
+当前脚本对 Claude transcript 做了很短的轮询，等最后一条 assistant 文本真正出现再播，避免这个时序窗。
+
+这是 **Claude Code 与 Codex 的设计差异**，非 bug。Codex CLI（无论 notify 还是 Stop Hook）都提供 `last_assistant_message`，而 Claude Code 官方只提供 `transcript_path`。
+
+解决方案：从 `transcript_path` 读取并解析为最终一条 assistant 回复，并在 Claude 路径上补一个短轮询。

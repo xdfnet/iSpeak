@@ -17,6 +17,11 @@ make clean      # 清理编译产物
 make help       # 显示帮助
 ```
 
+## 命令行测试约定
+
+- 测试 Claude：`claude -p "你好"`
+- 测试 Codex：`codex exec "你好"`
+
 ## 架构
 
 ```

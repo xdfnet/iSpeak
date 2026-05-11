@@ -52,7 +52,7 @@ function lastClaudeAssistant(payload) {
   if (direct) return { text: direct, turnId: extractTurnId(payload) };
 
   const transcript = firstString(payload.transcript_path, payload.transcriptPath);
-  return transcript ? lastAssistantFromTranscript(transcript, "claude") : { text: "", turnId: extractTurnId(payload) };
+  return transcript ? lastClaudeTranscript(transcript, payload) : { text: "", turnId: extractTurnId(payload) };
 }
 
 function lastCodexAssistant(payload) {
@@ -98,11 +98,29 @@ function firstString(...values) {
 
 function collectText(content) {
   if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map(item => item && typeof item.text === "string" ? item.text : "")
-    .filter(Boolean)
-    .join(" ");
+  if (Array.isArray(content)) {
+    return content
+      .map(item => collectText(item))
+      .filter(Boolean)
+      .join(" ");
+  }
+  if (!content || typeof content !== "object") return "";
+  if (typeof content.text === "string") return content.text;
+  if (content.content) return collectText(content.content);
+  return "";
+}
+
+function lastClaudeTranscript(file, payload) {
+  const deadline = Date.now() + 1200;
+  let result = { text: "", turnId: extractTurnId(payload) };
+
+  while (Date.now() <= deadline) {
+    result = lastAssistantFromTranscript(file, "claude");
+    if (result.text) return result;
+    sleepMs(120);
+  }
+
+  return result;
 }
 
 function lastAssistantFromTranscript(file, source) {
@@ -179,6 +197,10 @@ function textHash(text) {
   return crypto.createHash("sha1").update(text, "utf8").digest("hex");
 }
 
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 NODE
 )
 
@@ -191,6 +213,23 @@ echo "=== $(date) ===" >> "$LOG"
 echo "SOURCE: $SOURCE" >> "$LOG"
 echo "TEXT_LEN: ${#result}" >> "$LOG"
 echo "PREVIEW: ${result:0:150}" >> "$LOG"
+
+# Claude Code Stop Hook 调试
+if [[ "$SOURCE" == "claude" && -n "$input" ]]; then
+  # 用 grep 提取 transcript_path
+  tp=$(echo "$input" | grep -o '"transcript_path":"[^"]*"' | head -1 | sed 's/"transcript_path":"//;s/"$//')
+  if [[ -n "$tp" ]]; then
+    echo "CLAUDE_TRANSCRIPT_PATH: $tp" >> "$LOG"
+    if [[ -f "$tp" ]]; then
+      echo "CLAUDE_TRANSCRIPT_EXISTS: yes" >> "$LOG"
+    else
+      echo "CLAUDE_TRANSCRIPT_EXISTS: no" >> "$LOG"
+    fi
+  else
+    echo "CLAUDE_TRANSCRIPT_PATH: none" >> "$LOG"
+    echo "CLAUDE_RAW: ${input:0:300}" >> "$LOG"
+  fi
+fi
 
 if [[ -n "$result" && -S "$SOCK" ]]; then
   printf "{source:%s}%s" "$SOURCE" "$result" | nc -U -w5 "$SOCK" 2>> "$LOG"
