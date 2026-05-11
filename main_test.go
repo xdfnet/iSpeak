@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func TestSubmitClearsPendingOnly(t *testing.T) {
+func TestSubmitKeepsAllPendingTasks(t *testing.T) {
 	e := NewTaskEngine()
 	e.synthesizeStreamFn = func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {
 		return onAudio([]byte("ok"))
@@ -28,16 +28,11 @@ func TestSubmitClearsPendingOnly(t *testing.T) {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if len(e.pending) != 1 {
-		t.Fatalf("expected 1 pending, got %d", len(e.pending))
+	if len(e.pending) != 2 {
+		t.Fatalf("expected 2 pending, got %d", len(e.pending))
 	}
-	id := e.pending[0]
-	task, ok := e.tasks[id]
-	if !ok {
-		t.Fatalf("expected pending task exists")
-	}
-	if task.Text != "b" {
-		t.Fatalf("expected latest task text b, got %s", task.Text)
+	if e.latestID != 2 {
+		t.Fatalf("expected latestID 2, got %d", e.latestID)
 	}
 }
 
