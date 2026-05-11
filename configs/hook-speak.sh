@@ -6,6 +6,7 @@
 SOURCE="${1:-claude}"
 SOCK="$HOME/.config/iSpeak/ispeak.sock"
 LOG="$HOME/.config/iSpeak/hook.log"
+STATE_FILE="$HOME/.config/iSpeak/hook.last"
 
 # Codex `notify` 会把 JSON 作为最后一个参数传入；
 # Claude/Claude 风格 Stop Hook 会把 JSON 写到 stdin。
@@ -17,26 +18,41 @@ input_file=$(mktemp)
 trap 'rm -f "$input_file"' EXIT
 printf "%s" "$input" > "$input_file"
 
-text=$(SOURCE="$SOURCE" HOOK_INPUT_FILE="$input_file" node <<'NODE' 2>/dev/null
+result=$(SOURCE="$SOURCE" HOOK_INPUT_FILE="$input_file" HOOK_STATE_FILE="$STATE_FILE" node <<'NODE' 2>/dev/null
 const fs = require("fs");
+const crypto = require("crypto");
 
-{
+(() => {
   const input = readFile(process.env.HOOK_INPUT_FILE || "");
   const payload = parseJSON(input) || {};
   const source = process.env.SOURCE || "";
-  const text = source.startsWith("codex")
+  const stateFile = process.env.HOOK_STATE_FILE || "";
+  const result = source.startsWith("codex")
     ? lastCodexAssistant(payload)
     : lastClaudeAssistant(payload);
 
-  if (text) process.stdout.write(text);
-}
+  if (!result.text) {
+    return;
+  }
+
+  if (stateFile && result.turnId) {
+    if (isDuplicateTurn(stateFile, source, result.turnId)) {
+      return;
+    }
+    saveTurn(stateFile, source, result.turnId, result.text);
+  } else if (stateFile) {
+    saveTurn(stateFile, source, "", result.text);
+  }
+
+  process.stdout.write(result.text);
+})();
 
 function lastClaudeAssistant(payload) {
   const direct = firstString(payload.last_assistant_message, payload.message);
-  if (direct) return direct;
+  if (direct) return { text: direct, turnId: extractTurnId(payload) };
 
   const transcript = firstString(payload.transcript_path, payload.transcriptPath);
-  return transcript ? lastAssistantFromTranscript(transcript, "claude") : "";
+  return transcript ? lastAssistantFromTranscript(transcript, "claude") : { text: "", turnId: extractTurnId(payload) };
 }
 
 function lastCodexAssistant(payload) {
@@ -47,14 +63,14 @@ function lastCodexAssistant(payload) {
     payload.message,
     payload.lastMessage
   );
-  if (direct) return direct;
+  if (direct) return { text: direct, turnId: extractTurnId(payload) };
 
   const transcript = firstString(
     payload.transcript_path,
     payload.transcriptPath,
     payload["transcript-path"]
   );
-  return transcript ? lastAssistantFromTranscript(transcript, "codex") : "";
+  return transcript ? lastAssistantFromTranscript(transcript, "codex") : { text: "", turnId: extractTurnId(payload) };
 }
 
 function readFile(file) {
@@ -98,6 +114,7 @@ function lastAssistantFromTranscript(file, source) {
   }
 
   let last = "";
+  let turnId = "";
   for (const line of data.split(/\r?\n/)) {
     if (!line.trim()) continue;
     const event = parseJSON(line);
@@ -119,26 +136,64 @@ function lastAssistantFromTranscript(file, source) {
       event.payload.role === "assistant"
     ) {
       last = collectText(event.payload.content) || last;
+      turnId = turnId || extractTurnId(event) || extractTurnId(event.payload);
     }
   }
-  return last;
+  return { text: last, turnId };
+}
+
+function extractTurnId(payload) {
+  return firstString(
+    payload.turn_id,
+    payload.turnId,
+    payload["turn-id"],
+    payload.session_id,
+    payload.sessionId,
+    payload["session-id"],
+    payload.thread_id,
+    payload.threadId,
+    payload["thread-id"]
+  );
+}
+
+function isDuplicateTurn(stateFile, source, turnId) {
+  const current = `${source}:${turnId}`;
+  try {
+    return fs.readFileSync(stateFile, "utf8").trim() === current;
+  } catch {
+    return false;
+  }
+}
+
+function saveTurn(stateFile, source, turnId, text) {
+  const current = `${source}:${turnId || textHash(text)}`;
+  try {
+    fs.mkdirSync(require("path").dirname(stateFile), { recursive: true });
+    fs.writeFileSync(stateFile, current, "utf8");
+  } catch {
+    // 去重失败不影响播报。
+  }
+}
+
+function textHash(text) {
+  return crypto.createHash("sha1").update(text, "utf8").digest("hex");
 }
 
 NODE
 )
 
 if [[ "$ISPEAK_HOOK_PRINT_TEXT" == "1" ]]; then
-  printf "%s" "$text"
+  printf "%s" "$result"
   exit 0
 fi
 
 echo "=== $(date) ===" >> "$LOG"
 echo "SOURCE: $SOURCE" >> "$LOG"
-echo "TEXT_LEN: ${#text}" >> "$LOG"
-echo "PREVIEW: ${text:0:150}" >> "$LOG"
+echo "TEXT_LEN: ${#result}" >> "$LOG"
+echo "PREVIEW: ${result:0:150}" >> "$LOG"
 
-if [[ -n "$text" && -S "$SOCK" ]]; then
-  printf "{source:%s}%s" "$SOURCE" "$text" | nc -U -w5 "$SOCK" 2>> "$LOG"
+if [[ -n "$result" && -S "$SOCK" ]]; then
+  printf "{source:%s}%s" "$SOURCE" "$result" | nc -U -w5 "$SOCK" 2>> "$LOG"
   echo "SPOKE: OK" >> "$LOG"
 else
   echo "SPOKE: SKIP" >> "$LOG"

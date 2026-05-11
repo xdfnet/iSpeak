@@ -1,5 +1,5 @@
 // ttsd — 独立 TTS 播报守护进程
-// 监听 Unix Socket，收到文本 → 字节跳动 TTS SSE → 流式播放
+// 监听 Unix Socket，收到文本 → 字节跳动 TTS SSE/PCM → 原生流式播放
 package main
 
 import (
@@ -14,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -46,137 +45,6 @@ type StreamPlayer interface {
 	Write(audio []byte) error
 	CloseAndWait() error
 	Abort() error
-}
-
-type ffplayStreamPlayer struct {
-	path string
-	cmd  *exec.Cmd
-
-	mu       sync.Mutex
-	stdin    io.WriteCloser
-	waitOnce sync.Once
-	waitErr  error
-}
-
-func newDefaultStreamPlayer() (StreamPlayer, error) {
-	if path, ok := findExecutable("ffplay", "/opt/homebrew/bin/ffplay", "/usr/local/bin/ffplay"); ok {
-		log.Printf("播放器模式: ffplay 流式 stdin (%s)", path)
-		return newFFplayStreamPlayer(path)
-	}
-
-	log.Printf("播放器模式: afplay 完整音频 fallback")
-	return &bufferedStreamPlayer{}, nil
-}
-
-func findExecutable(name string, candidates ...string) (string, bool) {
-	if path, err := exec.LookPath(name); err == nil {
-		return path, true
-	}
-	for _, path := range candidates {
-		if st, err := os.Stat(path); err == nil && !st.IsDir() && st.Mode()&0111 != 0 {
-			return path, true
-		}
-	}
-	return "", false
-}
-
-func newFFplayStreamPlayer(path string) (*ffplayStreamPlayer, error) {
-	cmd := exec.Command(path, "-nodisp", "-autoexit", "-loglevel", "error", "-i", "pipe:0")
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		return nil, err
-	}
-	return &ffplayStreamPlayer{path: path, cmd: cmd, stdin: stdin}, nil
-}
-
-func (p *ffplayStreamPlayer) Write(audio []byte) error {
-	if len(audio) == 0 {
-		return nil
-	}
-	p.mu.Lock()
-	stdin := p.stdin
-	p.mu.Unlock()
-	if stdin == nil {
-		return fmt.Errorf("播放器输入已关闭")
-	}
-	if _, err := stdin.Write(audio); err != nil {
-		return fmt.Errorf("写入播放器失败: %w", err)
-	}
-	return nil
-}
-
-func (p *ffplayStreamPlayer) CloseAndWait() error {
-	p.mu.Lock()
-	stdin := p.stdin
-	p.stdin = nil
-	p.mu.Unlock()
-	if stdin != nil {
-		if err := stdin.Close(); err != nil {
-			return fmt.Errorf("关闭播放器输入失败: %w", err)
-		}
-	}
-	if err := p.wait(); err != nil {
-		return fmt.Errorf("ffplay failed: %w", err)
-	}
-	return nil
-}
-
-func (p *ffplayStreamPlayer) Abort() error {
-	p.mu.Lock()
-	stdin := p.stdin
-	p.stdin = nil
-	p.mu.Unlock()
-	if stdin != nil {
-		_ = stdin.Close()
-	}
-	if p.cmd != nil && p.cmd.Process != nil {
-		_ = p.cmd.Process.Kill()
-	}
-	return p.wait()
-}
-
-func (p *ffplayStreamPlayer) wait() error {
-	p.waitOnce.Do(func() {
-		if p.cmd != nil {
-			p.waitErr = p.cmd.Wait()
-		}
-	})
-	return p.waitErr
-}
-
-type bufferedStreamPlayer struct {
-	chunks [][]byte
-}
-
-func (p *bufferedStreamPlayer) Write(audio []byte) error {
-	if len(audio) == 0 {
-		return nil
-	}
-	chunk := append([]byte(nil), audio...)
-	p.chunks = append(p.chunks, chunk)
-	return nil
-}
-
-func (p *bufferedStreamPlayer) CloseAndWait() error {
-	total := 0
-	for _, chunk := range p.chunks {
-		total += len(chunk)
-	}
-	audio := make([]byte, 0, total)
-	for _, chunk := range p.chunks {
-		audio = append(audio, chunk...)
-	}
-	return playAudio(audio)
-}
-
-func (p *bufferedStreamPlayer) Abort() error {
-	p.chunks = nil
-	return nil
 }
 
 // 任务状态
@@ -312,13 +180,13 @@ func (e *TaskEngine) runTransaction(task *Task) error {
 
 	if err := e.synthesizeStreamFn(context.Background(), task.Cfg, task.Text, &task.Voice, onAudio); err != nil {
 		_ = player.Abort()
-		return err
+		return fmt.Errorf("TTS 合成失败: id=%d: %w", task.ID, err)
 	}
 	log.Printf("TTS 流结束: id=%d elapsed=%s", task.ID, time.Since(startedAt).Round(time.Millisecond))
 
 	if err := player.CloseAndWait(); err != nil {
 		_ = player.Abort()
-		return err
+		return fmt.Errorf("播放器失败: id=%d: %w", task.ID, err)
 	}
 	return nil
 }
@@ -476,28 +344,6 @@ type ttsAudioParams struct {
 	SampleRate int    `json:"sample_rate"`
 }
 
-// 调用字节跳动 TTS API，返回完整 MP3 音频数据。保留给测试和 fallback 使用。
-func synthesize(ctx context.Context, cfg Config, text string, voice *VoiceInfo) ([]byte, error) {
-	var chunks [][]byte
-	if err := synthesizeStream(ctx, cfg, text, voice, func(audio []byte) error {
-		chunk := append([]byte(nil), audio...)
-		chunks = append(chunks, chunk)
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-
-	total := 0
-	for _, c := range chunks {
-		total += len(c)
-	}
-	result := make([]byte, 0, total)
-	for _, c := range chunks {
-		result = append(result, c...)
-	}
-	return result, nil
-}
-
 // 调用字节跳动 TTS API，边解析 SSE 边回调 MP3 音频块
 func synthesizeStream(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error {
 	speaker := voice.VoiceType
@@ -512,8 +358,8 @@ func synthesizeStream(ctx context.Context, cfg Config, text string, voice *Voice
 			Text:    text,
 			Speaker: speaker,
 			AudioParams: ttsAudioParams{
-				Format:     "mp3",
-				SampleRate: 24000,
+				Format:     "pcm",
+				SampleRate: 48000,
 			},
 		},
 	}
@@ -844,21 +690,6 @@ func validateVoiceInfo(name string, voice *VoiceInfo) error {
 	}
 	if voice.ResourceID == "" {
 		return fmt.Errorf("%s.resourceId 未设置", name)
-	}
-	return nil
-}
-
-func playAudio(data []byte) error {
-	tmpFile := filepath.Join(tempDir, fmt.Sprintf("ttsd-%d.mp3", time.Now().UnixNano()))
-	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
-		return fmt.Errorf("写入临时文件失败: %w", err)
-	}
-	defer os.Remove(tmpFile)
-
-	cmd := exec.Command("/usr/bin/afplay", tmpFile)
-	log.Printf("播放开始: %s", filepath.Base(tmpFile))
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("播放失败: %w", err)
 	}
 	return nil
 }

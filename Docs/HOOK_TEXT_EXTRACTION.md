@@ -205,6 +205,7 @@ fi
 
 - Codex `notify`：读 `$2`
 - Claude / Codex Stop Hook：读 stdin
+- 如果 Codex 的 `notify` 和 `Stop` 同时启用，脚本会按 `turn_id` 去重，避免同一回合播两次
 
 Codex 文本字段优先级：
 

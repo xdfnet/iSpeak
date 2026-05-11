@@ -1,6 +1,6 @@
 # iSpeak
 
-![Version](https://img.shields.io/badge/version-1.6.6-blue)
+![Version](https://img.shields.io/badge/version-1.6.7-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.26-blue)](https://golang.org/dl/)
 ![Platform](https://img.shields.io/badge/platform-macOS-green)
@@ -39,11 +39,7 @@ ispeak-codex "构建完成，耗时 12 秒"
 npm i -g @xdfnet/ispeak
 ```
 
-当前 npm 安装会在本机编译 `ispeakd`，需要已安装 Go。没有 `ffplay` 时会自动回退 `afplay`；推荐安装 `ffmpeg` 获得流式播放：
-
-```bash
-brew install ffmpeg
-```
+当前 npm 安装会在本机编译 `ispeakd`，需要已安装 Go。主播放链路使用 macOS 原生 `AVAudioEngine`，不依赖 `ffmpeg`。失败时直接记录日志并删除任务。
 
 **源码安装：**
 
@@ -76,11 +72,11 @@ ispeak "iSpeak 准备好了"
 │         │                                            │
 │         ▼                                           │
 │   单 Worker 流式链路                                 │
-│   （SSE audio chunk → 播放器 stdin）                  │
+│   （SSE PCM chunk → AVAudioEngine）                 │
 │         │                                            │
 │         ▼                                           │
-│   流式播放器                                         │
-│   （优先 ffplay stdin，无 ffplay 回退 afplay）         │
+│   错误处理                                          │
+│   （失败时记录日志并删除任务）                        │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -193,6 +189,8 @@ notify = ["bash", "/Users/你的用户名/.config/iSpeak/hook-speak.sh", "codex"
   }
 }
 ```
+
+`hook-speak.sh` 会按 `turn_id` 做一次去重，所以即使 `notify` 和 `Stop` 都启用，同一回合也只会播一次。
 
 ## 开发命令
 
