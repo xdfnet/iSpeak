@@ -14,12 +14,6 @@ iSpeak 让 AI 编程助手开口说话。你写代码，它播结果——眼睛
 ```
 # 默认音色：温柔女声
 ispeak "Pull request 已合并，3 个测试通过"
-
-# Claude 模式：专属音色
-ispeak-claude "Code review 完成，发现 2 处可优化"
-
-# Codex 模式：另一种音色
-ispeak-codex "构建完成，耗时 12 秒"
 ```
 
 ## 为什么选 iSpeak
@@ -29,7 +23,7 @@ ispeak-codex "构建完成，耗时 12 秒"
 | AI 生成多条回复，TTS 账单飞涨 | 新消息只保留最新待执行任务，避免无效合成 |
 | 回复快慢不一，音频播报乱序 | 单 transaction worker，FIFO 顺序稳定 |
 | 修改配置要重启服务 | 热更新：编辑 `config.json` 立即生效 |
-| 默认音色太无聊 | 来源专属音色，Claude 和 Codex 声音不同 |
+| 默认音色太无聊 | hook 按来源前缀选择音色 |
 
 ## 快速上手
 
@@ -113,12 +107,6 @@ ispeak restart   # 重启服务
 ispeak version   # 版本
 ```
 
-语音专属快捷命令（指向 ispeak 的软链接）：
-```bash
-ispeak-claude "消息"   # Claude 专属音色
-ispeak-codex "消息"    # Codex 专属音色
-```
-
 ## 配置说明
 
 `~/.config/iSpeak/config.json`：
@@ -148,49 +136,9 @@ ispeak-codex "消息"    # Codex 专属音色
 
 ## 集成说明
 
-### Claude Code
+Claude Code 和 Codex 的详细 hook 配置见 [docs/hook-text-extraction.md](/Users/admin/iCode/iSpeak/docs/hook-text-extraction.md)。
 
-在 `~/.claude/settings.json` 中添加 Stop Hook：
-
-```json
-{
-  "hooks": {
-    "Stop": [{
-      "hooks": [{
-        "type": "command",
-        "command": "bash $HOME/.config/iSpeak/hook-speak.sh claude",
-        "timeout": 30
-      }]
-    }]
-  }
-}
-```
-
-### Codex
-
-推荐在 `~/.codex/config.toml` 中添加回合结束通知：
-
-```toml
-notify = ["bash", "/Users/你的用户名/.config/iSpeak/hook-speak.sh", "codex"]
-```
-
-如果你启用了 Codex hooks，也可以在 `~/.codex/hooks.json` 中添加 Stop Hook：
-
-```json
-{
-  "hooks": {
-    "Stop": [{
-      "hooks": [{
-        "type": "command",
-        "command": "bash $HOME/.config/iSpeak/hook-speak.sh codex",
-        "timeout": 30
-      }]
-    }]
-  }
-}
-```
-
-`hook-speak.sh` 会按 `turn_id` 做一次去重，所以即使 `notify` 和 `Stop` 都启用，同一回合也只会播一次。
+`hook-speak.sh` 会按 `turn_id` 做一次去重，所以同一回合不会播两次。
 
 ## 开发命令
 
@@ -207,7 +155,7 @@ make help       # 显示帮助
 
 | 文件 | 用途 |
 |------|------|
-| `~/Library/LaunchAgents/com.iSpeak.plist` | macOS 自动启动服务 |
+| `~/Library/LaunchAgents/com.ispeak.plist` | macOS 自动启动服务 |
 | `~/.config/iSpeak/ispeak.sock` | Unix Socket |
 | `~/.config/iSpeak/ispeak.log` | 日志（轮转） |
 | `~/.config/iSpeak/config.json` | 你的 API Key 和音色配置 |

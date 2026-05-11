@@ -4,14 +4,8 @@ set -euo pipefail
 
 VERSION="1.6.7"
 SOCK="$HOME/.config/iSpeak/ispeak.sock"
-PLIST="$HOME/Library/LaunchAgents/com.iSpeak.plist"
-CMD_NAME="$(basename "$0")"
-SOURCE_PREFIX=""
-
-case "$CMD_NAME" in
-  ispeak-claude) SOURCE_PREFIX="{source:claude}" ;;
-  ispeak-codex) SOURCE_PREFIX="{source:codex}" ;;
-esac
+PLIST="$HOME/Library/LaunchAgents/com.ispeak.plist"
+LEGACY_PLIST="$HOME/Library/LaunchAgents/com.iSpeak.plist"
 
 cmd_status() {
   echo "== iSpeak =="
@@ -28,6 +22,7 @@ cmd_status() {
 }
 
 cmd_restart() {
+  launchctl unload "$LEGACY_PLIST" 2>/dev/null || true
   launchctl unload "$PLIST" 2>/dev/null || true
   launchctl load "$PLIST"
   sleep 0.5
@@ -53,6 +48,6 @@ case "${1:-}" in
     echo "  ispeak version     版本"
     ;;
   *)
-    printf "%s%s" "$SOURCE_PREFIX" "$*" | nc -U -w5 "$SOCK" 2>/dev/null || echo "ispeak: socket 不可用" >&2
+    printf "%s" "$*" | nc -U -w5 "$SOCK" 2>/dev/null || echo "ispeak: socket 不可用" >&2
     ;;
 esac

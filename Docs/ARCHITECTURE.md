@@ -180,7 +180,7 @@ pending -> running -> delete
 └── hook-speak.sh    # Claude/Codex Hook
 
 ~/Library/LaunchAgents/
-└── com.iSpeak.plist # launchd 服务配置
+└── com.ispeak.plist # launchd 服务配置
 ```
 
 ## 稳定性设计

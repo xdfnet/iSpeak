@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.iSpeak</string>
+    <string>com.ispeak</string>
     <key>ProgramArguments</key>
     <array>
         <string>BINARY_PATH_PLACEHOLDER</string>

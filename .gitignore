@@ -1,6 +1,7 @@
-# macOS
-.DS_Store
-
 # Build artifacts
 build/
 iSpeak
+xdfnet-ispeak-*.tgz
+
+# macOS
+.DS_Store

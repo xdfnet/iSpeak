@@ -19,9 +19,7 @@
     "x64"
   ],
   "bin": {
-    "ispeak": "scripts/ispeak",
-    "ispeak-claude": "scripts/ispeak",
-    "ispeak-codex": "scripts/ispeak"
+    "ispeak": "scripts/ispeak"
   },
   "scripts": {
     "build": "go build -ldflags=\"-s -w\" -o build/ispeakd .",
@@ -38,7 +36,7 @@
     "scripts/ispeak",
     "configs/",
     "npm/",
-    "Docs/",
+    "docs/",
     "README.md",
     "LICENSE"
   ],

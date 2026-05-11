@@ -10,7 +10,8 @@ const root = path.resolve(__dirname, "..");
 const home = os.homedir();
 const binDir = path.join(home, ".local", "bin");
 const configDir = path.join(home, ".config", "iSpeak");
-const plistPath = path.join(home, "Library", "LaunchAgents", "com.iSpeak.plist");
+const plistPath = path.join(home, "Library", "LaunchAgents", "com.ispeak.plist");
+const legacyPlistPath = path.join(home, "Library", "LaunchAgents", "com.iSpeak.plist");
 const socketPath = path.join(configDir, "ispeak.sock");
 const binaryPath = path.join(binDir, "ispeakd");
 const cliPath = path.join(binDir, "ispeak");
@@ -136,12 +137,16 @@ function main() {
   run("go", ["build", "-ldflags=-s -w", "-o", buildPath, "."]);
 
   console.log("停止旧服务...");
+  run("launchctl", ["unload", legacyPlistPath], { allowFailure: true, stdio: "ignore" });
   run("launchctl", ["unload", plistPath], { allowFailure: true, stdio: "ignore" });
+  try {
+    fs.rmSync(legacyPlistPath, { force: true });
+  } catch (_) {
+    // Ignore migration cleanup failures.
+  }
 
   copyExecutable(buildPath, binaryPath);
   copyExecutable(path.join(root, "scripts", "ispeak"), cliPath);
-  symlinkForce(cliPath, path.join(binDir, "ispeak-claude"));
-  symlinkForce(cliPath, path.join(binDir, "ispeak-codex"));
 
   const configPath = path.join(configDir, "config.json");
   copyIfMissing(path.join(root, "configs", "config.example.json"), configPath);
@@ -149,7 +154,7 @@ function main() {
   installHook(path.join(root, "configs", "hook-speak.sh"), path.join(configDir, "hook-speak.sh"));
 
   const plist = fs
-    .readFileSync(path.join(root, "configs", "com.iSpeak.plist"), "utf8")
+    .readFileSync(path.join(root, "configs", "com.ispeak.plist"), "utf8")
     .replaceAll("BINARY_PATH_PLACEHOLDER", binaryPath);
   fs.writeFileSync(plistPath, plist);
 

@@ -5,7 +5,8 @@ TAG      := v$(VERSION)
 BIN     := build/ispeakd
 BIN_DIR := $(HOME)/.local/bin
 DST     := $(BIN_DIR)/ispeakd
-PLIST   := $(HOME)/Library/LaunchAgents/com.iSpeak.plist
+PLIST   := $(HOME)/Library/LaunchAgents/com.ispeak.plist
+LEGACY_PLIST := $(HOME)/Library/LaunchAgents/com.iSpeak.plist
 CONFIG  := $(HOME)/.config/iSpeak
 LOG     := $(HOME)/.config/iSpeak/ispeak.log
 
@@ -29,7 +30,7 @@ test:
 	@go test -count=1 ./...
 	@go test -race -count=1 ./...
 	@go build ./...
-	@bash scripts/test-hook-speak
+	@bash scripts/test-hook-speak.sh
 	@npm pack --dry-run
 
 pack:
@@ -57,13 +58,13 @@ push: test
 
 install: build
 	@# 停止旧服务
+	@launchctl unload $(LEGACY_PLIST) 2>/dev/null || true
 	@launchctl unload $(PLIST) 2>/dev/null || true
+	@rm -f $(LEGACY_PLIST)
 	@# 安装二进制和 CLI
 	@mkdir -p $(BIN_DIR)
 	@install -m 0755 $(BIN) $(DST)
 	@install -m 0755 $(CURDIR)/scripts/ispeak $(BIN_DIR)/ispeak
-	@ln -sf $(BIN_DIR)/ispeak $(BIN_DIR)/ispeak-claude
-	@ln -sf $(BIN_DIR)/ispeak $(BIN_DIR)/ispeak-codex
 	@# 部署配置文件（首次不覆盖已有）
 	@mkdir -p $(CONFIG)
 	@if [ ! -f $(CONFIG)/config.json ]; then \
@@ -86,7 +87,7 @@ install: build
 	@chmod +x $(CONFIG)/hook-speak.sh
 	@echo "Hook 脚本已安装: $(CONFIG)/hook-speak.sh"
 	@# 安装 launchd plist
-	@sed 's|BINARY_PATH_PLACEHOLDER|$(DST)|' configs/com.iSpeak.plist > $(PLIST)
+	@sed 's|BINARY_PATH_PLACEHOLDER|$(DST)|' configs/com.ispeak.plist > $(PLIST)
 	@# 启动
 	@launchctl load $(PLIST)
 	@sleep 0.5
@@ -97,10 +98,12 @@ deploy: install
 
 uninstall:
 	@echo "停止服务..."
+	@launchctl unload $(LEGACY_PLIST) 2>/dev/null || true
 	@launchctl unload $(PLIST) 2>/dev/null || true
+	@rm -f $(LEGACY_PLIST)
 	@rm -f $(PLIST)
 	@echo "删除文件..."
-	@rm -f $(BIN_DIR)/ispeakd $(BIN_DIR)/ispeak $(BIN_DIR)/ispeak-claude $(BIN_DIR)/ispeak-codex
+	@rm -f $(BIN_DIR)/ispeakd $(BIN_DIR)/ispeak
 	@echo "保留配置目录: $(CONFIG)"
 	@echo "卸载完成"
 

@@ -27,17 +27,18 @@ ispeak (CLI, bash)
            │    └─ pending FIFO
            └─ transactionWorker (single)
                 └─ pending -> running -> delete
-                     └─ SSE audio chunk -> ffplay stdin
+                     └─ SSE PCM chunk -> AVAudioEngine
 ```
 
 - **Socket**: `~/.config/iSpeak/ispeak.sock`
 - **日志**: `~/.config/iSpeak/ispeak.log` (lumberjack 轮转, 10MB/份, 保留3份)
 - **Temp**: 进程级 tempDir，退出时清理
-- **Launchd PLIST**: `~/Library/LaunchAgents/com.iSpeak.plist`
+- **Launchd PLIST**: `~/Library/LaunchAgents/com.ispeak.plist`
 
 ## 核心文件
 
 - `main.go` — 守护进程、任务引擎、TTS 流式请求、SSE 解析、流式播放
+- `avaudioengine_player_darwin.go` — macOS 原生 `AVAudioEngine` PCM 播放器
 - `clean_text.go` — TTS 播报文本清洗
 - `main_test.go` — 任务引擎关键行为测试
 - `scripts/ispeak` — CLI 入口，通过 nc 发送文本到 socket
@@ -91,6 +92,7 @@ pending → running → delete
 - 关键 goroutine 有 `panic recover`
 - 配置热更新（mtime 缓存 + 自动重载）
 - TTS HTTP Client 复用，减少连接开销
-- 优先 `ffplay` stdin 流式播放；无 `ffplay` 时回退完整音频 `afplay`
+- 主链路使用 macOS 原生 `AVAudioEngine` 播放 PCM
+- 播放失败直接删除任务，不重试
 - 日志轮转，防止文件过大
 - 进程级 temp 目录，退出时自动清理
