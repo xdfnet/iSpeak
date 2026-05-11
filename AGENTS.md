@@ -35,7 +35,6 @@ ispeak (CLI, bash)
 
 - **Socket**: `~/.config/iSpeak/ispeak.sock`
 - **日志**: `~/.config/iSpeak/ispeak.log` (lumberjack 轮转, 10MB/份, 保留3份)
-- **Temp**: 进程级 tempDir，退出时清理
 - **Launchd PLIST**: `~/Library/LaunchAgents/com.ispeak.plist`
 
 ## 核心文件
@@ -44,6 +43,8 @@ ispeak (CLI, bash)
 - `avaudioengine_player_darwin.go` — macOS 原生 `AVAudioEngine` PCM 播放器
 - `clean_text.go` — TTS 播报文本清洗
 - `main_test.go` — 测试套件
+- `scripts/ispeak` — CLI 入口，通过 nc 发送文本到 socket
+- `configs/hook-speak.sh` — Claude/Codex Hook，bash + Node 解析输入
 
 ## 发布指南
 
@@ -59,16 +60,8 @@ git add -A && git commit -m "release: vx.y.z — <简述>"
 make release
 ```
 
-`make release` 会自动：
-- 运行测试（含 race + hook fixtures）
-- 检查工作区是否干净
-- 检查 npm 版本是否已存在
-- 创建 git tag 并推送
-- 发布 npm 包
-
+`make release` 会自动：测试 → 检查工作区 → 创建 tag → 推送 → npm 发布。
 Makefile 和 `scripts/ispeak` 自动从 `package.json` 读取版本号，无需手动同步。
-- `scripts/ispeak` — CLI 入口，通过 nc 发送文本到 socket
-- `configs/hook-speak.sh` — Claude/Codex Hook，bash + Node 解析输入
 
 ## 消息格式
 
@@ -89,7 +82,9 @@ CLI 与 daemon 通过 socket 传输原始文本，支持音色前缀：
 
 ## 失败策略
 
-- 流式合成/播放失败：日志记录，继续处理下一条，不重试
+- 合成失败：记录日志，继续处理下一条，不重试
+- 播放器写入失败：关闭旧实例，新建 AVAudioEngine 继续工作
+- loop goroutine panic：自动重启
 
 ## 配置
 
@@ -110,10 +105,9 @@ CLI 与 daemon 通过 socket 传输原始文本，支持音色前缀：
 ## 稳定性设计
 
 - 单 Player goroutine，合成与播放同链路，降低首播延迟
-- AVAudioEngine 实例复用，避免重复初始化开销
+- loop recover：goroutine 崩溃后自动重启
+- AVAudioEngine 实例复用，写入失败自动重建
 - Channel buffer=1 + drain，新消息自动丢弃旧排队消息
-- 配置热更新（mtime 缓存 + 自动重载）
-- TTS HTTP Client 复用，减少连接开销
-- 主链路使用 macOS 原生 `AVAudioEngine` 播放 PCM
-- 合成/播放失败直接跳过，不重试
+- 配置热更新（mtime 缓存，每次连接重新加载）
+- TTS HTTP Client 复用，30s 超时
 - 日志轮转，防止文件过大
