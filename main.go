@@ -48,9 +48,10 @@ type Player struct {
 }
 
 type job struct {
-	text  string
-	voice VoiceInfo
-	cfg   Config
+	text   string
+	voice  VoiceInfo
+	source string
+	cfg    Config
 }
 
 func NewPlayer() *Player {
@@ -59,17 +60,24 @@ func NewPlayer() *Player {
 	return p
 }
 
-func (p *Player) Submit(text string, voice VoiceInfo, cfg Config) {
-	log.Printf("TTS: %s", text)
+func (p *Player) Submit(text string, voice VoiceInfo, source string, cfg Config) {
+	log.Printf("TTS [%s]: %s", source, text)
 	// 丢弃队列中的旧消息，只保留最新
 	select {
 	case <-p.ch:
 	default:
 	}
-	p.ch <- job{text, voice, cfg}
+	p.ch <- job{text, voice, source, cfg}
 }
 
 func (p *Player) loop() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Player loop 崩溃: %v，重启中", r)
+			go p.loop()
+		}
+	}()
+
 	player, err := newDefaultStreamPlayer()
 	if err != nil {
 		log.Printf("启动播放器失败: %v", err)
@@ -78,21 +86,37 @@ func (p *Player) loop() {
 	defer player.CloseAndWait()
 
 	for j := range p.ch {
-		p.play(j, player)
+		if err := p.play(j, player); err != nil {
+			log.Printf("播放器异常，重建: %v", err)
+			player.CloseAndWait()
+			player, err = newDefaultStreamPlayer()
+			if err != nil {
+				log.Printf("重建播放器失败: %v", err)
+				return
+			}
+		}
 	}
 }
 
-func (p *Player) play(j job, player StreamPlayer) {
+func (p *Player) play(j job, player StreamPlayer) error {
 	startedAt := time.Now()
+	var writeErr error
 	onAudio := func(audio []byte) error {
-		return player.Write(audio)
+		if err := player.Write(audio); err != nil {
+			writeErr = err
+			return err
+		}
+		return nil
 	}
 
 	if err := synthesizeStream(context.Background(), j.cfg, j.text, &j.voice, onAudio); err != nil {
+		if writeErr != nil {
+			return writeErr
+		}
 		log.Printf("TTS 合成失败: %v", err)
-		return
 	}
 	log.Printf("TTS: 完成 elapsed=%s", time.Since(startedAt).Round(time.Millisecond))
+	return nil
 }
 
 // 音色信息
@@ -535,7 +559,7 @@ func handleConnection(conn net.Conn, player *Player) {
 		return
 	}
 
-	voice, content := extractVoicePrefix(text, cfg)
+	source, voice, content := extractVoicePrefix(text, cfg)
 	if voice == nil {
 		voice = cfg.DefaultVoice
 	}
@@ -549,22 +573,24 @@ func handleConnection(conn net.Conn, player *Player) {
 		return
 	}
 
-	player.Submit(cleaned, *voice, cfg)
+	player.Submit(cleaned, *voice, source, cfg)
 }
 
-// 解析消息中的音色前缀，返回 VoiceInfo
-func extractVoicePrefix(text string, cfg Config) (voice *VoiceInfo, content string) {
+// 解析消息中的音色前缀，返回 (来源, 音色, 内容)
+func extractVoicePrefix(text string, cfg Config) (source string, voice *VoiceInfo, content string) {
 	// 格式: {source:claude}文本
 	const prefix = "{source:"
 	if strings.HasPrefix(text, prefix) {
 		if end := strings.Index(text, "}"); end > len(prefix) {
-			if v, ok := cfg.SourceVoices[text[len(prefix):end]]; ok {
+			source = text[len(prefix):end]
+			if v, ok := cfg.SourceVoices[source]; ok {
 				voice = v
 			}
 			content = text[end+1:]
 			return
 		}
 	}
+	source = "default"
 	content = text
 	return
 }

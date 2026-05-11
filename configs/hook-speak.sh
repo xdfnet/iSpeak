@@ -24,6 +24,9 @@ const fs = require("fs");
   const input = readFile(process.env.HOOK_INPUT_FILE || "");
   const payload = parseJSON(input) || {};
 
+  // Codex Stop hook 会在 agent-turn-complete 事件中重复触发，跳过
+  if (payload.type === "agent-turn-complete") return;
+
   const text = payload.last_assistant_message
     || payload["last-assistant-message"]
     || "";
@@ -47,6 +50,4 @@ fi
 
 if [[ -n "$result" && -S "$SOCK" ]]; then
   printf "{source:%s}%s" "$SOURCE" "$result" | nc -U -w5 "$SOCK" 2>> "$LOG"
-else
-  echo "$(date): SKIP source=$SOURCE text_len=${#result}" >> "$LOG"
 fi

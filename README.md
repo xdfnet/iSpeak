@@ -1,6 +1,6 @@
 # iSpeak
 
-![Version](https://img.shields.io/badge/version-1.6.9-blue)
+![Version](https://img.shields.io/badge/version-1.7.0-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.26-blue)](https://golang.org/dl/)
 ![Platform](https://img.shields.io/badge/platform-macOS-green)
@@ -20,8 +20,8 @@ ispeak "Pull request 已合并，3 个测试通过"
 
 | 问题 | 方案 |
 |------|------|
-| AI 生成多条回复，TTS 账单飞涨 | 新消息只保留最新待执行任务，避免无效合成 |
-| 回复快慢不一，音频播报乱序 | 单 transaction worker，FIFO 顺序稳定 |
+| AI 生成多条回复，TTS 账单飞涨 | 新消息丢弃旧排队消息，避免无效合成 |
+| 回复快慢不一，音频播报乱序 | 单 channel goroutine，串行顺序稳定 |
 | 修改配置要重启服务 | 热更新：编辑 `config.json` 立即生效 |
 | 默认音色太无聊 | hook 按来源前缀选择音色 |
 
@@ -33,7 +33,7 @@ ispeak "Pull request 已合并，3 个测试通过"
 npm i -g @xdfnet/ispeak
 ```
 
-当前 npm 安装会在本机编译 `ispeakd`，需要已安装 Go。主播放链路使用 macOS 原生 `AVAudioEngine`，不依赖 `ffmpeg`。失败时直接记录日志并删除任务。
+当前 npm 安装会在本机编译 `ispeakd`，需要已安装 Go。主播放链路使用 macOS 原生 `AVAudioEngine`，不依赖 `ffmpeg`。合成失败记录日志，播放器异常自动重建。
 
 **源码安装：**
 
@@ -61,25 +61,16 @@ ispeak "iSpeak 准备好了"
 │   通过 Unix Socket 接收文本                          │
 │         │                                            │
 │         ▼                                           │
-│   任务引擎                                           │
-│   （pending → running → delete）              │
+│   Player (channel)                                  │
+│   buffer=1 + drain（新消息丢弃旧排队消息）             │
 │         │                                            │
 │         ▼                                           │
-│   单 Worker 流式链路                                 │
-│   （SSE PCM chunk → AVAudioEngine）                 │
+│   TTS SSE → AVAudioEngine（单实例复用）              │
 │         │                                            │
 │         ▼                                           │
-│   错误处理                                          │
-│   （失败时记录日志并删除任务）                        │
+│   失败记录日志，播放器异常自动重建                    │
 └─────────────────────────────────────────────────────┘
 ```
-
-**任务状态流转：**
-```
-pending → running → delete
-```
-
-新消息到达时只清理未开始任务，不打断当前合成/播放；当前事务结束后再播最新消息。
 
 ## 语音清洗规则
 
@@ -138,7 +129,7 @@ ispeak version   # 版本
 
 Claude Code 和 Codex 的详细 hook 配置见 [docs/hook-text-extraction.md](/Users/admin/iCode/iSpeak/docs/hook-text-extraction.md)。
 
-`hook-speak.sh` 会按 `turn_id` 做一次去重，所以同一回合不会播两次。
+`hook-speak.sh` 会自动跳过 Codex 遗留 notify 的 `agent-turn-complete` 事件，避免同一回合重复播报。
 
 ## 开发命令
 

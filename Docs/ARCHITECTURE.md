@@ -2,179 +2,145 @@
 
 ## 概述
 
-iSpeak 是一个运行在 macOS 上的本地 TTS 播报守护进程，通过 Unix Socket 接收文本，调用火山引擎 TTS 流式 API，边合成边播放。
+iSpeak 是一个运行在 macOS 上的本地 TTS 播报守护进程，通过 Unix Socket 接收文本，调用火山引擎 TTS 流式 API，边合成边通过原生 AVAudioEngine 播放 PCM 音频。
 
-当前版本采用“任务仓库 + 单 transaction worker”流式链路：
-- transaction worker：领取待执行任务，SSE 每到一段音频就写入播放器 stdin
-- 播放器优先使用 `ffplay -i pipe:0`，没有 `ffplay` 时回退到完整音频 `afplay`
+核心链路：**Socket → Player (channel) → TTS SSE → AVAudioEngine**
 
 ## 系统架构
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         客户端                              │
-│  ispeak (bash CLI)  ──nc -U──>  ~/.config/iSpeak/ispeak.sock │
+│         nc -U  ─────────>  ~/.config/iSpeak/ispeak.sock      │
+│         ispeak "文本"      (Unix Socket)                    │
 └─────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                     ispeakd (Go Daemon)                    │
+│                     ispeakd (Go Daemon)                      │
 │                                                             │
-│  Socket Acceptor                                            │
-│    - net.Listener.Accept()                                  │
-│    - 每个连接读取文本并提交任务                               │
+│  Socket Acceptor (handleConnection)                         │
+│    - 读文本 → 解析 {source:xxx} → 选音色 → cleanText → 提交 │
 │                                                             │
-│  Task Engine                                                │
+│  Player (channel 驱动)                                      │
 │  ┌───────────────────────────────────────────────────────┐  │
-│  │  Task Repository (in-memory)                         │  │
-│  │  - tasks: map[uint64]*Task                           │  │
-│  │  - pending: []uint64 (FIFO)                          │  │
+│  │  chan job (buffer=1)                                  │  │
+│  │  Submit: drain 旧消息 → 入队最新                      │  │
+│  │  loop:   for j := range ch → play(j, player)          │  │
 │  └───────────────────────────────────────────────────────┘  │
 │             │                                               │
 │             ▼                                               │
-│  Transaction Worker (single)                               │
-│  - pending -> running                                      │
-│  - 调用 TTS 流式接口（失败直接删除，不重试）                  │
-│  - SSE audio chunk -> StreamPlayer.Write                    │
-│  - 播放完成后删除任务；失败直接删除任务                       │
-│                                                             │
+│  AVAudioEngine (cgo, 单实例复用)                            │
+│    - PCM 48kHz 单声道 int16 → float32                       │
+│    - 流式 scheduleBuffer + pending 计数 + cond 同步         │
+│    - 关闭时补齐残留字节                                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## 核心数据结构
 
-### Task
+### job
 
 ```go
-type Task struct {
-    ID     uint64     // 任务 ID（递增）
-    Text   string     // 过滤后的待执行文本
-    Status TaskStatus // 当前状态
-    Voice  VoiceInfo  // 任务音色快照
-    Cfg    Config     // 任务配置快照（提交时）
+type job struct {
+    text   string    // cleanText 清洗后的文本
+    voice  VoiceInfo // 音色快照
+    source string    // 来源: "claude" / "codex" / "default"
+    cfg    Config    // 配置快照
 }
 ```
 
-### TaskStatus
+### Player
 
 ```go
-const (
-    TaskStatusPending TaskStatus = iota // 待执行
-    TaskStatusRunning                   // 合成播放事务执行中
-)
-```
-
-说明：
-- 终态不持久化。任务成功/失败后都会从仓库删除。
-- 不保留 `failed/canceled/completed` 常驻状态，历史通过日志追踪。
-
-### TaskEngine
-
-```go
-type TaskEngine struct {
-    mu sync.Mutex
-
-    nextID       uint64
-    tasks        map[uint64]*Task
-    latestID     uint64
-    pending      []uint64
-    wake chan struct{}
-
-    synthesizeStreamFn func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error
-    newStreamPlayerFn  func() (StreamPlayer, error)
+type Player struct {
+    ch chan job   // buffer=1，串行播报
 }
 ```
 
-### 播放器接口
+单 goroutine 消费 channel，一个 AVAudioEngine 实例复用。新消息到达时 drain 旧消息，不打断正在播放的。
+
+### StreamPlayer
 
 ```go
 type StreamPlayer interface {
     Write(audio []byte) error
     CloseAndWait() error
-    Abort() error
 }
 ```
 
-## 状态机与逻辑
-
-### 状态流转
-
-```
-pending -> running -> delete
-```
-
-### 任务提交（核心规则）
-
-`Submit(cleanedText, voice, cfg)` 原子执行：
-1. 删除所有 `pending` 任务
-2. 不打断当前 `running` 事务
-3. 创建新任务（`pending`）
-4. 唤醒 transaction worker
-
-策略说明：
-- 未开始的旧任务直接删除
-- 已领取但过期的旧任务在事务执行前跳过
-- 正在合成/播放的任务自然结束
-
-### Transaction worker 规则
-
-1. FIFO 领取 `pending` 任务并置 `running`
-2. 启动 `StreamPlayer`
-3. 调用 TTS 流式接口，SSE 每解析出一个音频 chunk 就写入播放器
-4. TTS 结束后关闭播放器 stdin 并等待播放结束
-5. 成功：删除任务
-6. 失败：删除任务，不重试
-
 ## 消息流程
 
-### 1. 接收并清洗消息
+### 1. Socket 接收
 
-`handleConnection()`：
-- 读取 socket 文本
-- 解析 `{source:xxx}` 音色前缀
-- `cleanText()` 生成语音友好的文本
-- 将“过滤后文本”提交给 `TaskEngine.Submit`
+`handleConnection()`:
+1. `bufio.Scanner` 读取完整文本（最大 1MB）
+2. `extractVoicePrefix` 解析 `{source:claude}` 前缀，匹配 SourceVoices
+3. 未匹配到 → fallback 到 DefaultVoice
+4. `cleanText()` 过滤文本噪音（markdown/code/URL/path/UUID 等）
+5. `player.Submit(文本, 音色, 来源, 配置)`
 
-`cleanText()` 只影响 TTS 播报，不改变屏幕显示内容。当前清洗规则：
+### 2. 调度与去重
 
-- Markdown 格式符号：标题、加粗、反引号、引用符
-- Markdown 表格整块：表头、分隔线、表格内容
-- 代码块、artifact、HTML 页面源码
-- Markdown 链接 URL，仅保留链接标题
-- 绝对路径简化为“路径”
-- 长 commit hash、UUID、长 ID
-- 明显文件列表、模型分片列表、下载清单
-- 下载进度、速度、进度条、ANSI 控制符等终端噪声
+`Submit()`:
+- 非阻塞 drain channel 中旧消息：`select { case <-ch: default: }`
+- 新消息入队
 
-清洗目标是保留适合听的内容：结论、成功/失败状态、下一步动作、关键错误原因。
+策略：**新消息丢弃旧排队消息，不打断正在播放的**
 
-### 2. 流式合成播放阶段
+### 3. 流式合成与播放
 
-- transaction worker 领取任务
-- HTTP POST 火山引擎 TTS 接口
-- 解析 SSE 流并 base64 解码音频 chunk
-- 优先将 chunk 写入 `ffplay` stdin 实时播放
-- 没有 `ffplay` 时缓存完整音频，结束后写临时 MP3 并用 `afplay` 播放
-- 删除任务与临时文件
+`play()`:
+1. HTTP POST 火山引擎 `/api/v3/tts/unidirectional/sse`
+2. SSE 流式解析 → base64 解码 → PCM int16 数据
+3. 每块 PCM 立即写入 AVAudioEngine 播放
+4. **合成失败**：只记日志，播放器正常继续
+5. **播放器写入失败**：返回 error，loop 层重建 AVAudioEngine
 
-## 并发与一致性
+## SSE 解析
 
-- 单引擎锁 `mu` 保护任务仓库与 FIFO 队列
-- 单 transaction worker，保证播报顺序稳定
-- `wake` 为缓冲 1 的唤醒信号，防止重复唤醒堆积
-- FIFO 保证未开始任务公平顺序
+`parseSSEStream()`:
+- 逐行读取，累积 `data:` 行
+- 空行触发 flush → `processEvent()` 解析 JSON
+- 兼容非标准直出（无 `data:` 前缀的裸 JSON）
+- `extractAudioBase64` 递归提取：顶层 `data/audio/audio_data` → 嵌套 `data/result/payload`
+- 错误码检查：`code` 不为 0 且不为 20000000 时返回 error
+- 整条流无音频块 → 返回 `"no audio data"`
 
-## 失败与成本策略
+## 配置热加载
 
-- 新任务到达时只清理 `pending`，不打断当前任务
-- 流式合成/播放失败：直接删除任务，不重试，避免重复播报
-- 只保留最新消息优先播报，降低 TTS 成本
+`loadConfig()`:
+- mtime 缓存：路径相同 + 修改时间未变 → 直接返回缓存
+- 校验失败 → 用上一次有效配置兜底
+- 文件不存在 → fallback 环境变量 `IAGENT_TTS_API_KEY` / `IAGENT_TTS_ENDPOINT`
+
+## 稳定性设计
+
+- **panic recover**: loop goroutine 崩溃后 `go p.loop()` 自动重启
+- **播放器重建**: 写入失败时关闭旧实例并创建新的 AVAudioEngine
+- **新消息优先**: channel buffer=1 + drain，旧排队消息自动丢弃
+- **配置热加载**: 每次连接重新读取，mtime 缓存避免频繁 I/O
+- **HTTP 复用**: 全局 `ttsHTTPClient`，30s 超时，连接池复用
+- **日志轮转**: lumberjack，10MB/份，保留 3 份，压缩归档
+- **优雅退出**: SIGINT/SIGTERM 触发 listener.Close()
+
+## 清洗规则
+
+`cleanText()` 过滤顺序（先跨行块再行内符号）：
+
+1. 跳过代码块 (` ```...``` `)
+2. 跳过 artifact (`<artifact>...</artifact>`)
+3. 跳过 Markdown 表格（分隔线 + 表头 + 内容行）
+4. 跳过 HTML 源码行、进度噪声行
+5. 行内清洗：ANSI 转义 → 链接 URL → 绝对路径 → UUID → commit hash → markdown 符号 → HTML 标签
+
+保留适合听的内容：结论、状态、下一步动作、关键错误原因。
 
 ## 文件布局
 
 ```
 ~/.config/iSpeak/
-├── config.json      # API Key、音色配置
+├── config.json      # API Key、音色映射
 ├── ispeak.sock      # Unix Socket
 ├── ispeak.log       # 日志（lumberjack 轮转）
 └── hook-speak.sh    # Claude/Codex Hook
@@ -183,10 +149,18 @@ pending -> running -> delete
 └── com.ispeak.plist # launchd 服务配置
 ```
 
-## 稳定性设计
+## 来源 & 音色映射
 
-- 关键 worker 使用 `panic recover`
-- 配置热更新（每次连接重新加载配置）
-- 播放器子进程命令协议，保证“播完再删任务”
-- 日志轮转（10MB/份，保留 3 份）
-- 进程级 temp 目录，退出时自动清理
+Hook 传入 `{source:claude}` 前缀，ispeakd 解析后匹配 `config.json` 中的 `sourceVoices`：
+
+```json
+{
+  "defaultVoice": { "voice_type": "zh_female_mizai_uranus_bigtts", "resourceId": "seed-tts-2.0" },
+  "sourceVoices": {
+    "claude": { "voice_type": "zh_female_tianmeitaozi_uranus_bigtts", "resourceId": "seed-tts-2.0" },
+    "codex": { "voice_type": "zh_female_shuangkuaisisi_uranus_bigtts", "resourceId": "seed-tts-2.0" }
+  }
+}
+```
+
+日志区分来源：`TTS [claude]: 文本` / `TTS [codex]: 文本` / `TTS [default]: 文本`
