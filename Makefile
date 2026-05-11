@@ -1,7 +1,8 @@
-.PHONY: build test pack push install deploy uninstall clean help
+.PHONY: build test pack release push install deploy uninstall clean help
 
 VERSION  := 1.6.8
 TAG      := v$(VERSION)
+NPM_PKG  := @xdfnet/ispeak
 BIN     := build/ispeakd
 BIN_DIR := $(HOME)/.local/bin
 DST     := $(BIN_DIR)/ispeakd
@@ -9,13 +10,18 @@ PLIST   := $(HOME)/Library/LaunchAgents/com.ispeak.plist
 LEGACY_PLIST := $(HOME)/Library/LaunchAgents/com.iSpeak.plist
 CONFIG  := $(HOME)/.config/iSpeak
 LOG     := $(HOME)/.config/iSpeak/ispeak.log
+CLI_SRC := scripts/ispeak
+HOOK_SRC := configs/hook-speak.sh
+PLIST_SRC := configs/com.ispeak.plist
+CONFIG_SRC := configs/config.example.json
 
 help:
 	@echo "iSpeak $(VERSION)"
 	@echo ""
 	@echo "  make build      # 编译 ispeakd"
 	@echo "  make test       # 运行 Go 测试、race 测试、构建、npm 打包预检"
-	@echo "  make push       # 推送 GitHub tag 并发布 npm latest"
+	@echo "  make release    # 推送 GitHub tag 并发布 npm latest"
+	@echo "  make push       # 同 release"
 	@echo "  make install    # 安装并启动服务（首次运行会部署配置和 hook）"
 	@echo "  make deploy     # 同 install"
 	@echo "  make uninstall  # 卸载（停止服务 + 删除文件）"
@@ -36,10 +42,14 @@ test:
 pack:
 	@npm pack --dry-run
 
-push: test
+release: test
 	@if [ -n "$$(git status --porcelain)" ]; then \
 		echo "工作区不干净，请先提交或暂存改动"; \
 		git status --short; \
+		exit 1; \
+	fi
+	@if npm view $(NPM_PKG)@$(VERSION) version >/dev/null 2>&1; then \
+		echo "npm 版本已存在: $(NPM_PKG)@$(VERSION)"; \
 		exit 1; \
 	fi
 	@if git rev-parse "$(TAG)" >/dev/null 2>&1; then \
@@ -47,14 +57,12 @@ push: test
 	else \
 		git tag "$(TAG)"; \
 	fi
-	@if npm view @xdfnet/ispeak@$(VERSION) version >/dev/null 2>&1; then \
-		echo "npm 版本已存在: @xdfnet/ispeak@$(VERSION)"; \
-		exit 1; \
-	fi
 	@git push origin HEAD
 	@git push origin "$(TAG)"
 	@npm publish --access public
-	@echo "已发布: @xdfnet/ispeak@$(VERSION) / $(TAG)"
+	@echo "已发布: $(NPM_PKG)@$(VERSION) / $(TAG)"
+
+push: release
 
 install: build
 	@# 停止旧服务
@@ -64,11 +72,11 @@ install: build
 	@# 安装二进制和 CLI
 	@mkdir -p $(BIN_DIR)
 	@install -m 0755 $(BIN) $(DST)
-	@install -m 0755 $(CURDIR)/scripts/ispeak $(BIN_DIR)/ispeak
+	@install -m 0755 $(CURDIR)/$(CLI_SRC) $(BIN_DIR)/ispeak
 	@# 部署配置文件（首次不覆盖已有）
 	@mkdir -p $(CONFIG)
 	@if [ ! -f $(CONFIG)/config.json ]; then \
-		cp configs/config.example.json $(CONFIG)/config.json; \
+		cp $(CONFIG_SRC) $(CONFIG)/config.json; \
 		echo "配置文件已创建: $(CONFIG)/config.json"; \
 	else \
 		echo "配置文件已存在: $(CONFIG)/config.json"; \
@@ -79,15 +87,15 @@ install: build
 		echo "配置 endpoint 已迁移到 SSE，旧配置备份: $(CONFIG)/config.json.bak"; \
 	fi
 	@# 部署 hook 脚本（覆盖安装；如有本地改动先备份）
-	@if [ -f $(CONFIG)/hook-speak.sh ] && ! cmp -s configs/hook-speak.sh $(CONFIG)/hook-speak.sh; then \
+	@if [ -f $(CONFIG)/hook-speak.sh ] && ! cmp -s $(HOOK_SRC) $(CONFIG)/hook-speak.sh; then \
 		cp $(CONFIG)/hook-speak.sh $(CONFIG)/hook-speak.sh.bak; \
 		echo "旧 Hook 已备份: $(CONFIG)/hook-speak.sh.bak"; \
 	fi
-	@cp configs/hook-speak.sh $(CONFIG)/hook-speak.sh
+	@cp $(HOOK_SRC) $(CONFIG)/hook-speak.sh
 	@chmod +x $(CONFIG)/hook-speak.sh
 	@echo "Hook 脚本已安装: $(CONFIG)/hook-speak.sh"
 	@# 安装 launchd plist
-	@sed 's|BINARY_PATH_PLACEHOLDER|$(DST)|' configs/com.ispeak.plist > $(PLIST)
+	@sed 's|BINARY_PATH_PLACEHOLDER|$(DST)|' $(PLIST_SRC) > $(PLIST)
 	@# 启动
 	@launchctl load $(PLIST)
 	@sleep 0.5
