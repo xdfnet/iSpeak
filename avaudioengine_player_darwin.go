@@ -21,7 +21,6 @@ typedef struct {
 	pthread_cond_t cond;
 	int pending;
 	int closing;
-	int started;
 } AVNativePlayer;
 
 static char *av_make_error(const char *prefix, NSError *error) {
@@ -91,7 +90,6 @@ static int av_player_create(double sampleRate, unsigned int channels, AVNativePl
 		}
 
 		[player->node play];
-		player->started = 1;
 		*out = player;
 		return 0;
 	}

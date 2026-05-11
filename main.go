@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,9 +34,6 @@ var (
 )
 
 var ttsHTTPClient = &http.Client{Timeout: 30 * time.Second}
-
-// 进程级 temp 目录（进程退出时清理）
-var tempDir string
 
 var errAlreadyRunning = errors.New("iSpeak already running")
 
@@ -422,15 +418,6 @@ func main() {
 		Compress:   true,
 	})
 
-	// 创建进程级 temp 目录
-	cleanupOldTempDirs()
-	var err error
-	tempDir, err = os.MkdirTemp("", "ttsd-*")
-	if err != nil {
-		log.Fatalf("创建 temp 目录失败: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
-
 	cfg := loadConfig()
 	if err := validateConfig(cfg); err != nil {
 		log.Fatalf("配置错误: %v", err)
@@ -498,19 +485,6 @@ func listenUnixSocket(socketPath string) (net.Listener, error) {
 	}
 	log.Printf("已清理残留 socket: %s", socketPath)
 	return listener, nil
-}
-
-// 清理历史遗留的 temp 目录（进程崩溃时留下）
-func cleanupOldTempDirs() {
-	entries, err := os.ReadDir(os.TempDir())
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "ttsd-") {
-			os.RemoveAll(filepath.Join(os.TempDir(), e.Name()))
-		}
-	}
 }
 
 // 校验配置必填项
