@@ -111,7 +111,7 @@ function collectText(content) {
 }
 
 function lastClaudeTranscript(file, payload) {
-  const deadline = Date.now() + 1200;
+  const deadline = Date.now() + 5000;
   let result = { text: "", turnId: extractTurnId(payload) };
 
   while (Date.now() <= deadline) {
@@ -164,13 +164,7 @@ function extractTurnId(payload) {
   return firstString(
     payload.turn_id,
     payload.turnId,
-    payload["turn-id"],
-    payload.session_id,
-    payload.sessionId,
-    payload["session-id"],
-    payload.thread_id,
-    payload.threadId,
-    payload["thread-id"]
+    payload["turn-id"]
   );
 }
 
