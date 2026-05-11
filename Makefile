@@ -1,6 +1,6 @@
 .PHONY: build test pack push install deploy uninstall clean help
 
-VERSION  := 1.6.7
+VERSION  := 1.6.8
 TAG      := v$(VERSION)
 BIN     := build/ispeakd
 BIN_DIR := $(HOME)/.local/bin
