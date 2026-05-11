@@ -96,12 +96,6 @@ func (e *TaskEngine) Start() {
 func (e *TaskEngine) Submit(text string, voice VoiceInfo, cfg Config) uint64 {
 	e.mu.Lock()
 
-	// 新任务进来先删所有未开始的任务。
-	for _, id := range e.pending {
-		delete(e.tasks, id)
-		log.Printf("删除待执行任务: id=%d", id)
-	}
-	e.pending = e.pending[:0]
 
 	e.nextID++
 	task := &Task{
