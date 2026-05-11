@@ -47,193 +47,81 @@ type StreamPlayer interface {
 	Abort() error
 }
 
-// 任务状态
-// 生命周期：pending -> running -> delete
-type TaskStatus int
-
-const (
-	TaskStatusPending TaskStatus = iota
-	TaskStatusRunning
-)
-
-// 单个 TTS 任务
-type Task struct {
-	ID     uint64
-	Text   string
-	Status TaskStatus
-	Voice  VoiceInfo
-	Cfg    Config
+// 单播放器：新的打断旧的，不用队列
+type Player struct {
+	mu        sync.Mutex
+	gen       int64
+	currentGen int64
+	player    StreamPlayer
 }
 
-// 任务引擎：任务仓库 + 单事务 worker
-type TaskEngine struct {
-	mu sync.Mutex
-
-	nextID   uint64
-	latestID uint64
-	tasks    map[uint64]*Task
-	pending  []uint64
-
-	wake chan struct{}
-
-	synthesizeStreamFn func(ctx context.Context, cfg Config, text string, voice *VoiceInfo, onAudio func([]byte) error) error
-	newStreamPlayerFn  func() (StreamPlayer, error)
+func NewPlayer() *Player {
+	return &Player{}
 }
 
-func NewTaskEngine() *TaskEngine {
-	return &TaskEngine{
-		tasks:              make(map[uint64]*Task),
-		wake:               make(chan struct{}, 1),
-		synthesizeStreamFn: synthesizeStream,
-		newStreamPlayerFn:  newDefaultStreamPlayer,
-	}
-}
+func (p *Player) Submit(text string, voice VoiceInfo, cfg Config) {
+	p.mu.Lock()
+	p.gen++
+	currentGen := p.gen
+	p.player = nil
 
-func (e *TaskEngine) Start() {
-	go e.transactionWorker()
-}
-
-func (e *TaskEngine) Submit(text string, voice VoiceInfo, cfg Config) uint64 {
-	e.mu.Lock()
-
-
-	e.nextID++
-	task := &Task{
-		ID:     e.nextID,
-		Text:   text,
-		Status: TaskStatusPending,
-		Voice:  voice,
-		Cfg:    cfg,
-	}
-	e.tasks[task.ID] = task
-	e.latestID = task.ID
-	e.pending = append(e.pending, task.ID)
-	log.Printf("任务创建: id=%d text=%s", task.ID, text)
-
-	notify(e.wake)
-	e.mu.Unlock()
-
-	return task.ID
-}
-
-func (e *TaskEngine) transactionWorker() {
-	for {
-		id := e.claimPending()
-		if id == 0 {
-			<-e.wake
-			continue
-		}
-
-		e.processTransaction(id)
-	}
-}
-
-func (e *TaskEngine) processTransaction(id uint64) {
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("播报任务崩溃并删除: id=%d err=%v", id, r)
-			e.deleteTask(id)
-		}
-	}()
-
-	task, ok := e.getTask(id)
-	if !ok {
-		return
-	}
-	if !e.isLatestTask(id) {
-		log.Printf("跳过过期播报任务: id=%d", id)
-		e.deleteTask(id)
-		return
-	}
-
-	if err := e.runTransaction(task); err != nil {
-		log.Printf("播报失败并删除任务: id=%d err=%v", id, err)
-		e.deleteTask(id)
-		return
-	}
-
-	log.Printf("播报完成并删除任务: id=%d", id)
-	e.deleteTask(id)
-}
-
-func (e *TaskEngine) runTransaction(task *Task) error {
-	startedAt := time.Now()
-	player, err := e.newStreamPlayerFn()
+	player, err := newDefaultStreamPlayer()
 	if err != nil {
-		return fmt.Errorf("启动播放器失败: %w", err)
+		log.Printf("启动播放器失败: %v", err)
+		p.mu.Unlock()
+		return
 	}
+	p.player = player
+	log.Printf("TTS: %s", text)
 
-	firstChunkLogged := false
-	onAudio := func(audio []byte) error {
-		if len(audio) > 0 && !firstChunkLogged {
-			firstChunkLogged = true
-			log.Printf("首个音频 chunk: id=%d elapsed=%s bytes=%d", task.ID, time.Since(startedAt).Round(time.Millisecond), len(audio))
+	startedAt := time.Now()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("播报崩溃: %v", r)
+			}
+		}()
+
+		onAudio := func(audio []byte) error {
+			p.mu.Lock()
+			stale := currentGen != p.gen
+			p.mu.Unlock()
+			if stale {
+				return errors.New("stale")
+			}
+			if err := player.Write(audio); err != nil {
+				return err
+			}
+			if len(audio) > 0 {
+				log.Printf("首个音频 chunk elapsed=%s bytes=%d", time.Since(startedAt).Round(time.Millisecond), len(audio))
+			}
+			return nil
 		}
-		return player.Write(audio)
-	}
 
-	if err := e.synthesizeStreamFn(context.Background(), task.Cfg, task.Text, &task.Voice, onAudio); err != nil {
-		_ = player.Abort()
-		return fmt.Errorf("TTS 合成失败: id=%d: %w", task.ID, err)
-	}
-	log.Printf("TTS 流结束: id=%d elapsed=%s", task.ID, time.Since(startedAt).Round(time.Millisecond))
-
-	if err := player.CloseAndWait(); err != nil {
-		_ = player.Abort()
-		return fmt.Errorf("播放器失败: id=%d: %w", task.ID, err)
-	}
-	return nil
-}
-
-func (e *TaskEngine) claimPending() uint64 {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	for len(e.pending) > 0 {
-		id := e.pending[0]
-		e.pending = e.pending[1:]
-		task, ok := e.tasks[id]
-		if !ok {
-			continue
+		if err := synthesizeStream(context.Background(), cfg, text, &voice, onAudio); err != nil {
+			if !strings.Contains(err.Error(), "stale") {
+				log.Printf("TTS 合成失败: %v", err)
+			}
+			_ = player.Abort()
+			p.mu.Lock()
+			if p.player == player {
+				p.player = nil
+			}
+			p.mu.Unlock()
+			return
 		}
-		if task.Status != TaskStatusPending {
-			continue
+
+		log.Printf("TTS 流结束 elapsed=%s", time.Since(startedAt).Round(time.Millisecond))
+		if err := player.CloseAndWait(); err != nil {
+			log.Printf("播放器失败: %v", err)
 		}
-		task.Status = TaskStatusRunning
-		return id
-	}
-	return 0
-}
-
-func (e *TaskEngine) getTask(id uint64) (*Task, bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	task, ok := e.tasks[id]
-	if !ok {
-		return nil, false
-	}
-	clone := *task
-	return &clone, true
-}
-
-func (e *TaskEngine) deleteTask(id uint64) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	delete(e.tasks, id)
-}
-
-func (e *TaskEngine) isLatestTask(id uint64) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.latestID == id
-}
-
-func notify(ch chan struct{}) {
-	select {
-	case ch <- struct{}{}:
-	default:
-	}
+		p.mu.Lock()
+		if p.player == player {
+			p.player = nil
+		}
+		p.mu.Unlock()
+	}()
+	p.mu.Unlock()
 }
 
 // 音色信息
@@ -595,8 +483,7 @@ func main() {
 		listener.Close()
 	}()
 
-	engine := NewTaskEngine()
-	engine.Start()
+	player := NewPlayer()
 
 	log.Printf("iSpeak 已启动，监听 %s", socketPath)
 	for {
@@ -607,7 +494,7 @@ func main() {
 			}
 			continue
 		}
-		go handleConnection(conn, engine)
+		go handleConnection(conn, player)
 	}
 }
 
@@ -688,7 +575,7 @@ func validateVoiceInfo(name string, voice *VoiceInfo) error {
 	return nil
 }
 
-func handleConnection(conn net.Conn, engine *TaskEngine) {
+func handleConnection(conn net.Conn, player *Player) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("连接处理崩溃: %v", r)
@@ -735,8 +622,7 @@ func handleConnection(conn net.Conn, engine *TaskEngine) {
 		return
 	}
 
-	log.Printf("TTS: %s", cleaned)
-	engine.Submit(cleaned, *voice, cfg)
+	player.Submit(cleaned, *voice, cfg)
 }
 
 // 解析消息中的音色前缀，返回 VoiceInfo
