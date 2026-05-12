@@ -131,6 +131,17 @@ Claude Code 和 Codex 的详细 hook 配置见 [docs/hook-text-extraction.md](/U
 
 `hook-speak.sh` 会自动跳过 Codex 遗留 notify 的 `agent-turn-complete` 事件，避免同一回合重复播报。
 
+Codex CLI 首次加载 `~/.codex/hooks.json` 后，会要求信任新的 Stop hook。进入 Codex 后执行 `/hooks`，找到：
+
+```text
+Event     Stop
+Source    User config - ~/.codex/hooks.json
+Command   bash /Users/admin/.config/iSpeak/hook-speak.sh codex
+Trust     New hook - review required
+```
+
+按界面提示信任该 hook；状态变为 `Trusted` 后，Codex 结束回合时才会执行播报。若 Codex Desktop 仍不触发，重启 App 或新开一个 thread。
+
 ## 开发命令
 
 ```bash
