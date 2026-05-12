@@ -1,13 +1,13 @@
 # iSpeak
 
-![Version](https://img.shields.io/badge/version-1.7.0-blue)
+![Version](https://img.shields.io/badge/version-1.8.0-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.26-blue)](https://golang.org/dl/)
 ![Platform](https://img.shields.io/badge/platform-macOS-green)
 
 iSpeak 让 AI 编程助手开口说话。你写代码，它播结果——眼睛休息，耳朵来听。
 
-适合 Claude Code 或 Codex 常驻后台的开发者。AI 完成任务后自动播报；你发新消息时，未开始的旧播报会被丢弃，不花冤枉钱。
+适合 Claude Code、Codex 或 Pi 常驻后台的开发者。AI 完成任务后自动播报；你发新消息时，未开始的旧播报会被丢弃，不花冤枉钱。
 
 ## 效果示例
 
@@ -118,6 +118,10 @@ ispeak version   # 版本
     "codex": {
       "voice_type": "zh_male_shaonianzixin_uranus_bigtts",
       "resourceId": "seed-tts-2.0"
+    },
+    "pi": {
+      "voice_type": "zh_female_mizai_uranus_bigtts",
+      "resourceId": "seed-tts-2.0"
     }
   }
 }
@@ -142,6 +146,22 @@ Trust     New hook - review required
 
 按界面提示信任该 hook；状态变为 `Trusted` 后，Codex 结束回合时才会执行播报。若 Codex Desktop 仍不触发，重启 App 或新开一个 thread。
 
+### Pi
+
+Pi 使用 Extension 机制接入，`make install` 会自动部署。
+
+Pi 的全局设置（`~/.pi/agent/settings.json`）中指定扩展路径：
+
+```json
+{
+  "extensions": [
+    "/Users/你的用户名/.config/iSpeak/ispeak.ts"
+  ]
+}
+```
+
+无需额外配置，每次 Pi 回复完成后自动播报。多 Agent 共用同一个 `ispeakd` 服务，`config.json` 中通过 `sourceVoices.pi` 选择专属音色。
+
 ## 开发命令
 
 ```bash
@@ -162,6 +182,7 @@ make help       # 显示帮助
 | `~/.config/iSpeak/ispeak.log` | 日志（轮转） |
 | `~/.config/iSpeak/config.json` | 你的 API Key 和音色配置 |
 | `~/.config/iSpeak/hook-speak.sh` | Claude/Codex Hook 脚本 |
+| `~/.config/iSpeak/ispeak.ts` | Pi Extension 脚本 |
 
 ## License
 

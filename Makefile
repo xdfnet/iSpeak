@@ -12,6 +12,7 @@ CONFIG  := $(HOME)/.config/iSpeak
 LOG     := $(HOME)/.config/iSpeak/ispeak.log
 CLI_SRC := scripts/ispeak
 HOOK_SRC := configs/hook-speak.sh
+PI_EXT_SRC := configs/ispeak.ts
 PLIST_SRC := configs/com.ispeak.plist
 CONFIG_SRC := configs/config.example.json
 
@@ -94,6 +95,9 @@ install: build
 	@cp $(HOOK_SRC) $(CONFIG)/hook-speak.sh
 	@chmod +x $(CONFIG)/hook-speak.sh
 	@echo "Hook 脚本已安装: $(CONFIG)/hook-speak.sh"
+	@# 部署 Pi Extension
+	@cp $(PI_EXT_SRC) $(CONFIG)/ispeak.ts
+	@echo "Pi Extension 已安装: $(CONFIG)/ispeak.ts"
 	@# 安装 launchd plist
 	@sed 's|BINARY_PATH_PLACEHOLDER|$(DST)|' $(PLIST_SRC) > $(PLIST)
 	@# 启动

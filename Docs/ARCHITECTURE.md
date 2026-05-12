@@ -11,8 +11,9 @@ iSpeak 是一个运行在 macOS 上的本地 TTS 播报守护进程，通过 Uni
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         客户端                              │
+│         ispeak "文本" / Pi Extension / Claude Hook            │
 │         nc -U  ─────────>  ~/.config/iSpeak/ispeak.sock      │
-│         ispeak "文本"      (Unix Socket)                    │
+│         (Unix Socket)                                        │
 └─────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -45,7 +46,7 @@ iSpeak 是一个运行在 macOS 上的本地 TTS 播报守护进程，通过 Uni
 type job struct {
     text   string    // cleanText 清洗后的文本
     voice  VoiceInfo // 音色快照
-    source string    // 来源: "claude" / "codex" / "default"
+    source string    // 来源: "claude" / "codex" / "pi" / "default"
     cfg    Config    // 配置快照
 }
 ```
@@ -143,7 +144,8 @@ type StreamPlayer interface {
 ├── config.json      # API Key、音色映射
 ├── ispeak.sock      # Unix Socket
 ├── ispeak.log       # 日志（lumberjack 轮转）
-└── hook-speak.sh    # Claude/Codex Hook
+├── hook-speak.sh    # Claude/Codex Hook
+└── ispeak.ts        # Pi Extension
 
 ~/Library/LaunchAgents/
 └── com.ispeak.plist # launchd 服务配置
@@ -158,9 +160,10 @@ Hook 传入 `{source:claude}` 前缀，ispeakd 解析后匹配 `config.json` 中
   "defaultVoice": { "voice_type": "zh_female_mizai_uranus_bigtts", "resourceId": "seed-tts-2.0" },
   "sourceVoices": {
     "claude": { "voice_type": "zh_female_tianmeitaozi_uranus_bigtts", "resourceId": "seed-tts-2.0" },
-    "codex": { "voice_type": "zh_female_shuangkuaisisi_uranus_bigtts", "resourceId": "seed-tts-2.0" }
+    "codex": { "voice_type": "zh_female_shuangkuaisisi_uranus_bigtts", "resourceId": "seed-tts-2.0" },
+    "pi": { "voice_type": "zh_female_mizai_uranus_bigtts", "resourceId": "seed-tts-2.0" }
   }
 }
 ```
 
-日志区分来源：`TTS [claude]: 文本` / `TTS [codex]: 文本` / `TTS [default]: 文本`
+日志区分来源：`TTS [claude]: 文本` / `TTS [codex]: 文本` / `TTS [pi]: 文本` / `TTS [default]: 文本`
