@@ -41,15 +41,6 @@ function copyExecutable(src, dst) {
   fs.chmodSync(dst, 0o755);
 }
 
-function symlinkForce(target, linkPath) {
-  try {
-    fs.rmSync(linkPath, { force: true });
-  } catch (_) {
-    // Ignore stale link cleanup failures; copyExecutable below will surface real errors.
-  }
-  fs.symlinkSync(target, linkPath);
-}
-
 function copyIfMissing(src, dst, mode) {
   if (fs.existsSync(dst)) {
     console.log(`配置文件已存在: ${dst}`);
@@ -147,6 +138,10 @@ function main() {
 
   copyExecutable(buildPath, binaryPath);
   copyExecutable(path.join(root, "scripts", "ispeak"), cliPath);
+  copyExecutable(path.join(root, "scripts", "ispeak-claude"), path.join(binDir, "ispeak-claude"));
+  copyExecutable(path.join(root, "scripts", "ispeak-codex"), path.join(binDir, "ispeak-codex"));
+  copyExecutable(path.join(root, "scripts", "ispeak-copilot"), path.join(binDir, "ispeak-copilot"));
+  copyExecutable(path.join(root, "scripts", "ispeak-pi"), path.join(binDir, "ispeak-pi"));
 
   const configPath = path.join(configDir, "config.json");
   copyIfMissing(path.join(root, "configs", "config.example.json"), configPath);

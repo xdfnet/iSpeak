@@ -11,7 +11,15 @@
       "resourceId": "seed-tts-2.0"
     },
     "codex": {
-      "voice_type": "zh_male_shaonianzixin_uranus_bigtts",
+      "voice_type": "zh_female_xiaohe_uranus_bigtts",
+      "resourceId": "seed-tts-2.0"
+    },
+    "copilot": {
+      "voice_type": "zh_male_dayi_uranus_bigtts",
+      "resourceId": "seed-tts-2.0"
+    },
+    "pi": {
+      "voice_type": "zh_male_taocheng_uranus_bigtts",
       "resourceId": "seed-tts-2.0"
     }
   }

@@ -1,13 +1,13 @@
 # iSpeak
 
-![Version](https://img.shields.io/badge/version-1.8.0-blue)
+![Version](https://img.shields.io/badge/version-1.8.1-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.26-blue)](https://golang.org/dl/)
 ![Platform](https://img.shields.io/badge/platform-macOS-green)
 
 iSpeak 让 AI 编程助手开口说话。你写代码，它播结果——眼睛休息，耳朵来听。
 
-适合 Claude Code、Codex 或 Pi 常驻后台的开发者。AI 完成任务后自动播报；你发新消息时，未开始的旧播报会被丢弃，不花冤枉钱。
+适合 Claude Code、Codex、Copilot CLI 或 Pi 常驻后台的开发者。AI 完成任务后自动播报；你发新消息时，未开始的旧播报会被丢弃，不花冤枉钱。
 
 ## 效果示例
 
@@ -24,6 +24,7 @@ ispeak "Pull request 已合并，3 个测试通过"
 | 回复快慢不一，音频播报乱序 | 单 channel goroutine，串行顺序稳定 |
 | 修改配置要重启服务 | 热更新：编辑 `config.json` 立即生效 |
 | 默认音色太无聊 | hook 按来源前缀选择音色 |
+| Copilot 播到上一条回复 | 记录已播文本 hash，等待最新 transcript 落盘 |
 
 ## 快速上手
 
@@ -47,6 +48,7 @@ git clone https://github.com/xdfnet/iSpeak.git && cd iSpeak && make install
 open ~/.config/iSpeak/config.json
 ispeak status
 ispeak "iSpeak 准备好了"
+ispeak-copilot "Copilot 音色测试"
 ```
 
 ## 工作原理
@@ -74,7 +76,7 @@ ispeak "iSpeak 准备好了"
 
 ## 语音清洗规则
 
-清洗只影响 TTS 播报内容，不改变 Claude/Codex 屏幕显示内容。
+清洗只影响 TTS 播报内容，不改变 AI 助手屏幕显示内容。
 
 播报前会过滤或简化这些内容：
 
@@ -92,10 +94,14 @@ ispeak "iSpeak 准备好了"
 ## 全部命令
 
 ```bash
-ispeak "消息"    # 播报
-ispeak status    # 服务状态
-ispeak restart   # 重启服务
-ispeak version   # 版本
+ispeak "消息"          # 默认音色播报
+ispeak-claude "消息"   # Claude 音色播报
+ispeak-codex "消息"    # Codex 音色播报
+ispeak-copilot "消息"  # Copilot 音色播报
+ispeak-pi "消息"       # Pi 音色播报
+ispeak status          # 服务状态
+ispeak restart         # 重启服务
+ispeak version         # 版本
 ```
 
 ## 配置说明
@@ -116,11 +122,15 @@ ispeak version   # 版本
       "resourceId": "seed-tts-2.0"
     },
     "codex": {
-      "voice_type": "zh_male_shaonianzixin_uranus_bigtts",
+      "voice_type": "zh_female_xiaohe_uranus_bigtts",
       "resourceId": "seed-tts-2.0"
     },
     "pi": {
-      "voice_type": "zh_female_mizai_uranus_bigtts",
+      "voice_type": "zh_male_taocheng_uranus_bigtts",
+      "resourceId": "seed-tts-2.0"
+    },
+    "copilot": {
+      "voice_type": "zh_male_dayi_uranus_bigtts",
       "resourceId": "seed-tts-2.0"
     }
   }
@@ -131,20 +141,66 @@ ispeak version   # 版本
 
 ## 集成说明
 
-Claude Code 和 Codex 的详细 hook 配置见 [docs/hook-text-extraction.md](/Users/admin/iCode/iSpeak/docs/hook-text-extraction.md)。
+`hook-speak.sh` 统一服务 Claude Code、Codex、Copilot CLI；Pi 使用独立的 Extension 脚本。详细提取逻辑见 [docs/hook-text-extraction.md](/Users/admin/iCode/iSpeak/docs/hook-text-extraction.md)。
 
-`hook-speak.sh` 会自动跳过 Codex 遗留 notify 的 `agent-turn-complete` 事件，避免同一回合重复播报。
+### Claude Code
 
-Codex CLI 首次加载 `~/.codex/hooks.json` 后，会要求信任新的 Stop hook。进入 Codex 后执行 `/hooks`，找到：
+Hook 配置在 `~/.claude/settings.json`：
 
-```text
-Event     Stop
-Source    User config - ~/.codex/hooks.json
-Command   bash /Users/admin/.config/iSpeak/hook-speak.sh codex
-Trust     New hook - review required
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "bash ~/.config/iSpeak/hook-speak.sh claude"
+      }
+    ]
+  }
+}
 ```
 
-按界面提示信任该 hook；状态变为 `Trusted` 后，Codex 结束回合时才会执行播报。若 Codex Desktop 仍不触发，重启 App 或新开一个 thread。
+### Codex
+
+Hook 配置在 `~/.codex/hooks.json`：
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "bash /Users/admin/.config/iSpeak/hook-speak.sh codex"
+      }
+    ]
+  }
+}
+```
+
+首次加载后 Codex 会要求信任新的 Stop hook。进入 Codex 后执行 `/hooks`，找到对应条目并信任即可。
+
+### Copilot CLI
+
+Hook 配置在 `~/.copilot/hooks/ispeak-hook.json`：
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "bash $HOME/.config/iSpeak/hook-speak.sh copilot",
+        "timeoutSec": 10
+      }
+    ]
+  }
+}
+```
+
+Copilot CLI 的 `agentStop` 不直接提供 `last_assistant_message`，而是通过 `transcriptPath` 指向 JSONL 日志文件。`hook-speak.sh` 会自动识别并读取 transcript 提取最后一条 assistant 消息。重启 Copilot CLI 后生效。
+
+Copilot 的 transcript 有时会晚于 `agentStop` 事件落盘。脚本会把上次已播文本的 hash 写入 `~/.config/iSpeak/hook.last`；如果当前读到的仍是上一条回复，会最多等待 4 秒，直到新的 `assistant.message` 出现再播。
 
 ### Pi
 
@@ -166,6 +222,7 @@ Pi 的全局设置（`~/.pi/agent/settings.json`）中指定扩展路径：
 
 ```bash
 make build      # 编译 ispeakd
+make test       # 运行 Go/race/hook/npm 打包预检
 make install    # 安装并启动服务（自动自检）
 make deploy     # 安装 + 部署配置文件（不覆盖已有配置）
 make uninstall  # 卸载（停止服务 + 删除文件）
@@ -181,8 +238,11 @@ make help       # 显示帮助
 | `~/.config/iSpeak/ispeak.sock` | Unix Socket |
 | `~/.config/iSpeak/ispeak.log` | 日志（轮转） |
 | `~/.config/iSpeak/config.json` | 你的 API Key 和音色配置 |
-| `~/.config/iSpeak/hook-speak.sh` | Claude/Codex Hook 脚本 |
+| `~/.config/iSpeak/hook.last` | Copilot hook 去除上一条回复的状态文件 |
+| `~/.config/iSpeak/hook-speak.sh` | Claude / Codex / Copilot CLI Hook 脚本 |
 | `~/.config/iSpeak/ispeak.ts` | Pi Extension 脚本 |
+| `~/.local/bin/ispeak-*` | 默认和各来源 CLI 入口 |
+| `~/.copilot/hooks/ispeak-hook.json` | Copilot CLI Hook 配置 |
 
 ## License
 

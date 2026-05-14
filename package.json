@@ -1,6 +1,6 @@
 {
   "name": "@xdfnet/ispeak",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "Local macOS TTS daemon for AI coding assistants, powered by Volcengine streaming TTS.",
   "license": "MIT",
   "homepage": "https://github.com/xdfnet/iSpeak#readme",
@@ -19,7 +19,11 @@
     "x64"
   ],
   "bin": {
-    "ispeak": "scripts/ispeak"
+    "ispeak": "scripts/ispeak",
+    "ispeak-claude": "scripts/ispeak-claude",
+    "ispeak-codex": "scripts/ispeak-codex",
+    "ispeak-copilot": "scripts/ispeak-copilot",
+    "ispeak-pi": "scripts/ispeak-pi"
   },
   "scripts": {
     "build": "go build -ldflags=\"-s -w\" -o build/ispeakd .",
@@ -40,6 +44,10 @@
     "go.mod",
     "go.sum",
     "scripts/ispeak",
+    "scripts/ispeak-claude",
+    "scripts/ispeak-codex",
+    "scripts/ispeak-copilot",
+    "scripts/ispeak-pi",
     "configs/",
     "npm/",
     "docs/",

@@ -355,7 +355,8 @@ func processEvent(payload string, onAudio func([]byte) error) (bool, error) {
 	}
 
 	if b64 := extractAudioBase64(event); b64 != "" {
-		data, err := base64.StdEncoding.DecodeString(b64)
+		decoded := base64.NewDecoder(base64.StdEncoding, strings.NewReader(b64))
+		data, err := io.ReadAll(decoded)
 		if err != nil {
 			return false, fmt.Errorf("decode audio chunk: %w", err)
 		}
@@ -463,8 +464,17 @@ func main() {
 }
 
 func listenUnixSocket(socketPath string) (net.Listener, error) {
+	// 预清理：如果存在残留 socket 文件，先移除
+	if _, err := os.Stat(socketPath); err == nil {
+		if info, statErr := os.Stat(socketPath); statErr == nil && info.Mode()&os.ModeSocket == 0 {
+			_ = os.Remove(socketPath)
+		}
+	}
+
 	listener, err := net.Listen("unix", socketPath)
 	if err == nil {
+		// 严格权限：只允许 owner 读写
+		_ = os.Chmod(socketPath, 0600)
 		return listener, nil
 	}
 
@@ -472,6 +482,7 @@ func listenUnixSocket(socketPath string) (net.Listener, error) {
 		_ = os.Remove(socketPath)
 		listener, retryErr := net.Listen("unix", socketPath)
 		if retryErr == nil {
+			_ = os.Chmod(socketPath, 0600)
 			return listener, nil
 		}
 		return nil, retryErr
@@ -483,6 +494,16 @@ func listenUnixSocket(socketPath string) (net.Listener, error) {
 		return nil, errAlreadyRunning
 	}
 
+	// 竞态保护：短暂等待后重试一次（其他进程可能正在创建 socket）
+	time.Sleep(50 * time.Millisecond)
+	listener, retryErr := net.Listen("unix", socketPath)
+	if retryErr == nil {
+		_ = os.Chmod(socketPath, 0600)
+		log.Printf("已清理残留 socket: %s", socketPath)
+		return listener, nil
+	}
+
+	// 最后尝试直接移除再监听
 	if removeErr := os.Remove(socketPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
 		return nil, removeErr
 	}
@@ -490,6 +511,7 @@ func listenUnixSocket(socketPath string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
+	_ = os.Chmod(socketPath, 0600)
 	log.Printf("已清理残留 socket: %s", socketPath)
 	return listener, nil
 }
@@ -577,12 +599,18 @@ func handleConnection(conn net.Conn, player *Player) {
 }
 
 // 解析消息中的音色前缀，返回 (来源, 音色, 内容)
+const maxSourceLen = 64
+
 func extractVoicePrefix(text string, cfg Config) (source string, voice *VoiceInfo, content string) {
 	// 格式: {source:claude}文本
 	const prefix = "{source:"
 	if strings.HasPrefix(text, prefix) {
 		if end := strings.Index(text, "}"); end > len(prefix) {
 			source = text[len(prefix):end]
+			// 限制 source 长度，防止超长恶意输入
+			if len(source) > maxSourceLen {
+				return "default", nil, text
+			}
 			if v, ok := cfg.SourceVoices[source]; ok {
 				voice = v
 			}

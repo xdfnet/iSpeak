@@ -135,6 +135,7 @@ static int av_player_write(AVNativePlayer *player, const void *data, size_t len,
 			pthread_cond_signal(&captured->cond);
 		}
 		pthread_mutex_unlock(&captured->mu);
+		[buffer release];
 	}];
 
 	return 0;

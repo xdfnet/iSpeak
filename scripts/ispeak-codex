@@ -1,1 +1,5 @@
-ispeak
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ISPEAK_SOURCE=codex exec "$SCRIPT_DIR/ispeak" "$@"

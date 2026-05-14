@@ -11,7 +11,8 @@ iSpeak 是一个运行在 macOS 上的本地 TTS 播报守护进程，通过 Uni
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         客户端                              │
-│         ispeak "文本" / Pi Extension / Claude Hook            │
+│ ispeak + ispeak-{claude,codex,copilot,pi}                   │
+│ Claude/Codex/Copilot Hook + Pi Extension                    │
 │         nc -U  ─────────>  ~/.config/iSpeak/ispeak.sock      │
 │         (Unix Socket)                                        │
 └─────────────────────────────────────────────────────────────┘
@@ -34,7 +35,8 @@ iSpeak 是一个运行在 macOS 上的本地 TTS 播报守护进程，通过 Uni
 │  AVAudioEngine (cgo, 单实例复用)                            │
 │    - PCM 48kHz 单声道 int16 → float32                       │
 │    - 流式 scheduleBuffer + pending 计数 + cond 同步         │
-│    - 关闭时补齐残留字节                                     │
+│    - 奇数字节暂存到下一次写入                                │
+│    - buffer completion 后释放 AVAudioPCMBuffer                │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -46,7 +48,7 @@ iSpeak 是一个运行在 macOS 上的本地 TTS 播报守护进程，通过 Uni
 type job struct {
     text   string    // cleanText 清洗后的文本
     voice  VoiceInfo // 音色快照
-    source string    // 来源: "claude" / "codex" / "pi" / "default"
+    source string    // 来源: "claude" / "codex" / "copilot" / "pi" / "default"
     cfg    Config    // 配置快照
 }
 ```
@@ -98,6 +100,14 @@ type StreamPlayer interface {
 4. **合成失败**：只记日志，播放器正常继续
 5. **播放器写入失败**：返回 error，loop 层重建 AVAudioEngine
 
+### 4. Hook 与来源入口
+
+- `scripts/ispeak` 是主 CLI；`ispeak-claude`、`ispeak-codex`、`ispeak-copilot`、`ispeak-pi` 是 wrapper，通过 `ISPEAK_SOURCE` 自动加 `{source:...}` 前缀。
+- `configs/hook-speak.sh` 统一服务 Claude Code、Codex、Copilot CLI。
+- Claude/Codex 直接读取 `last_assistant_message` 或 `last-assistant-message`。
+- Codex legacy `agent-turn-complete` 会被跳过，避免与现代 Stop Hook 重复播报。
+- Copilot CLI 只给 `transcriptPath`，hook 读取 JSONL 中最后一条 `assistant.message`。如果最后一条仍是上次已播文本，会用 `~/.config/iSpeak/hook.last` 的 hash 最多等待 4 秒，等最新回复落盘再播。
+
 ## SSE 解析
 
 `parseSSEStream()`:
@@ -124,6 +134,8 @@ type StreamPlayer interface {
 - **HTTP 复用**: 全局 `ttsHTTPClient`，30s 超时，连接池复用
 - **日志轮转**: lumberjack，10MB/份，保留 3 份，压缩归档
 - **优雅退出**: SIGINT/SIGTERM 触发 listener.Close()
+- **Copilot 延迟落盘保护**: hook 记录已播文本 hash，避免只播到倒数第二条回复
+- **AVAudioBuffer 生命周期**: `scheduleBuffer` 完成后释放 buffer，长期运行不按 chunk 泄漏
 
 ## 清洗规则
 
@@ -144,26 +156,35 @@ type StreamPlayer interface {
 ├── config.json      # API Key、音色映射
 ├── ispeak.sock      # Unix Socket
 ├── ispeak.log       # 日志（lumberjack 轮转）
-├── hook-speak.sh    # Claude/Codex Hook
+├── hook.last        # Copilot 最新已播文本 hash
+├── hook-speak.sh    # Claude/Codex/Copilot CLI Hook
 └── ispeak.ts        # Pi Extension
 
 ~/Library/LaunchAgents/
 └── com.ispeak.plist # launchd 服务配置
+
+~/.local/bin/
+├── ispeak
+├── ispeak-claude
+├── ispeak-codex
+├── ispeak-copilot
+└── ispeak-pi
 ```
 
 ## 来源 & 音色映射
 
-Hook 传入 `{source:claude}` 前缀，ispeakd 解析后匹配 `config.json` 中的 `sourceVoices`：
+Hook 或 CLI 传入 `{source:claude}` 前缀，ispeakd 解析后匹配 `config.json` 中的 `sourceVoices`：
 
 ```json
 {
   "defaultVoice": { "voice_type": "zh_female_mizai_uranus_bigtts", "resourceId": "seed-tts-2.0" },
   "sourceVoices": {
     "claude": { "voice_type": "zh_female_tianmeitaozi_uranus_bigtts", "resourceId": "seed-tts-2.0" },
-    "codex": { "voice_type": "zh_female_shuangkuaisisi_uranus_bigtts", "resourceId": "seed-tts-2.0" },
-    "pi": { "voice_type": "zh_female_mizai_uranus_bigtts", "resourceId": "seed-tts-2.0" }
+    "codex": { "voice_type": "zh_female_xiaohe_uranus_bigtts", "resourceId": "seed-tts-2.0" },
+    "copilot": { "voice_type": "zh_male_dayi_uranus_bigtts", "resourceId": "seed-tts-2.0" },
+    "pi": { "voice_type": "zh_male_taocheng_uranus_bigtts", "resourceId": "seed-tts-2.0" }
   }
 }
 ```
 
-日志区分来源：`TTS [claude]: 文本` / `TTS [codex]: 文本` / `TTS [pi]: 文本` / `TTS [default]: 文本`
+日志区分来源：`TTS [claude]: 文本` / `TTS [codex]: 文本` / `TTS [copilot]: 文本` / `TTS [pi]: 文本` / `TTS [default]: 文本`

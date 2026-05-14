@@ -74,6 +74,10 @@ install: build
 	@mkdir -p $(BIN_DIR)
 	@install -m 0755 $(BIN) $(DST)
 	@install -m 0755 $(CURDIR)/$(CLI_SRC) $(BIN_DIR)/ispeak
+	@install -m 0755 $(CURDIR)/scripts/ispeak-claude $(BIN_DIR)/ispeak-claude
+	@install -m 0755 $(CURDIR)/scripts/ispeak-codex $(BIN_DIR)/ispeak-codex
+	@install -m 0755 $(CURDIR)/scripts/ispeak-copilot $(BIN_DIR)/ispeak-copilot
+	@install -m 0755 $(CURDIR)/scripts/ispeak-pi $(BIN_DIR)/ispeak-pi
 	@# 部署配置文件（首次不覆盖已有）
 	@mkdir -p $(CONFIG)
 	@if [ ! -f $(CONFIG)/config.json ]; then \
@@ -115,7 +119,7 @@ uninstall:
 	@rm -f $(LEGACY_PLIST)
 	@rm -f $(PLIST)
 	@echo "删除文件..."
-	@rm -f $(BIN_DIR)/ispeakd $(BIN_DIR)/ispeak
+	@rm -f $(BIN_DIR)/ispeakd $(BIN_DIR)/ispeak $(BIN_DIR)/ispeak-claude $(BIN_DIR)/ispeak-codex $(BIN_DIR)/ispeak-copilot $(BIN_DIR)/ispeak-pi
 	@echo "保留配置目录: $(CONFIG)"
 	@echo "卸载完成"
 

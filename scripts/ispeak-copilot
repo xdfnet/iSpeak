@@ -2,4 +2,4 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ISPEAK_SOURCE=claude exec "$SCRIPT_DIR/ispeak" "$@"
+ISPEAK_SOURCE=copilot exec "$SCRIPT_DIR/ispeak" "$@"
