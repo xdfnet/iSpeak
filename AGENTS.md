@@ -118,7 +118,7 @@ CLI 与 daemon 通过 socket 传输原始文本，支持音色前缀：
 - AVAudioEngine 实例复用，写入失败自动重建
 - AVAudioPCMBuffer completion 后释放，避免长期播报按 chunk 泄漏
 - Channel buffer=1 + drain，新消息自动丢弃旧排队消息
-- Copilot `agentStop` 可能先于 transcript 最新消息落盘，hook 通过 `hook.last` 文本 hash 等待新回复
+- Copilot `agentStop` 可能先于 transcript 最新消息落盘，hook 只取最新用户消息后的 assistant，并通过 `hook.last` assistant id 等待新回复
 - 配置热更新（mtime 缓存，每次连接重新加载）
 - TTS HTTP Client 复用，30s 超时
 - 日志轮转，防止文件过大

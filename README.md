@@ -1,6 +1,6 @@
 # iSpeak
 
-![Version](https://img.shields.io/badge/version-1.8.1-blue)
+![Version](https://img.shields.io/badge/version-1.8.2-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Go Version](https://img.shields.io/badge/Go-1.26-blue)](https://golang.org/dl/)
 ![Platform](https://img.shields.io/badge/platform-macOS-green)
@@ -24,7 +24,7 @@ ispeak "Pull request 已合并，3 个测试通过"
 | 回复快慢不一，音频播报乱序 | 单 channel goroutine，串行顺序稳定 |
 | 修改配置要重启服务 | 热更新：编辑 `config.json` 立即生效 |
 | 默认音色太无聊 | hook 按来源前缀选择音色 |
-| Copilot 播到上一条回复 | 记录已播文本 hash，等待最新 transcript 落盘 |
+| Copilot 播到上一条回复 | 只取最新用户消息后的 assistant，并用消息 id 去重 |
 
 ## 快速上手
 
@@ -152,13 +152,19 @@ Hook 配置在 `~/.claude/settings.json`：
   "hooks": {
     "Stop": [
       {
-        "type": "command",
-        "command": "bash ~/.config/iSpeak/hook-speak.sh claude"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.config/iSpeak/hook-speak.sh claude"
+          }
+        ]
       }
     ]
   }
 }
 ```
+
+Claude Code 官方 hook 是三层结构：事件 → matcher group → handlers。`Stop` 会提供 `last_assistant_message`，脚本直接读取这个字段。
 
 ### Codex
 
@@ -169,15 +175,20 @@ Hook 配置在 `~/.codex/hooks.json`：
   "hooks": {
     "Stop": [
       {
-        "type": "command",
-        "command": "bash /Users/admin/.config/iSpeak/hook-speak.sh codex"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/admin/.config/iSpeak/hook-speak.sh codex",
+            "timeout": 30
+          }
+        ]
       }
     ]
   }
 }
 ```
 
-首次加载后 Codex 会要求信任新的 Stop hook。进入 Codex 后执行 `/hooks`，找到对应条目并信任即可。
+Codex 官方 hook 是三层结构：事件 → matcher group → handlers；`Stop` 的 `matcher` 当前会被忽略，可省略。首次加载后 Codex 会要求信任新的 Stop hook。进入 Codex 后执行 `/hooks`，找到对应条目并信任即可。
 
 ### Copilot CLI
 
@@ -198,9 +209,9 @@ Hook 配置在 `~/.copilot/hooks/ispeak-hook.json`：
 }
 ```
 
-Copilot CLI 的 `agentStop` 不直接提供 `last_assistant_message`，而是通过 `transcriptPath` 指向 JSONL 日志文件。`hook-speak.sh` 会自动识别并读取 transcript 提取最后一条 assistant 消息。重启 Copilot CLI 后生效。
+Copilot CLI 的 `agentStop` 不直接提供 `last_assistant_message`，而是通过 `transcriptPath` 指向 JSONL 日志文件。`hook-speak.sh` 会自动识别并读取 transcript，只提取最新 `user.message` 之后的 assistant 消息。重启 Copilot CLI 后生效。
 
-Copilot 的 transcript 有时会晚于 `agentStop` 事件落盘。脚本会把上次已播文本的 hash 写入 `~/.config/iSpeak/hook.last`；如果当前读到的仍是上一条回复，会最多等待 4 秒，直到新的 `assistant.message` 出现再播。
+Copilot 的 transcript 有时会晚于 `agentStop` 事件落盘。脚本会把上次已播 assistant 的 `id` 写入 `~/.config/iSpeak/hook.last`（无 `id` 时回退文本 hash）；如果当前轮还没有新回复，会最多等待 4 秒，直到新的 `assistant.message` 出现再播。
 
 ### Pi
 
@@ -229,6 +240,17 @@ make uninstall  # 卸载（停止服务 + 删除文件）
 make clean      # 清理编译产物
 make help       # 显示帮助
 ```
+
+## 更多文档
+
+完整文档索引见 [docs/README.md](/Users/admin/iCode/iSpeak/docs/README.md)。常用入口：
+
+- [安装与集成](/Users/admin/iCode/iSpeak/docs/install-and-integration.md)
+- [配置说明](/Users/admin/iCode/iSpeak/docs/configuration.md)
+- [排障手册](/Users/admin/iCode/iSpeak/docs/troubleshooting.md)
+- [运维手册](/Users/admin/iCode/iSpeak/docs/operations.md)
+- [发布流程](/Users/admin/iCode/iSpeak/docs/release.md)
+- [架构文档](/Users/admin/iCode/iSpeak/docs/architecture.md)
 
 ## 文件路径
 

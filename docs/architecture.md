@@ -104,9 +104,18 @@ type StreamPlayer interface {
 
 - `scripts/ispeak` 是主 CLI；`ispeak-claude`、`ispeak-codex`、`ispeak-copilot`、`ispeak-pi` 是 wrapper，通过 `ISPEAK_SOURCE` 自动加 `{source:...}` 前缀。
 - `configs/hook-speak.sh` 统一服务 Claude Code、Codex、Copilot CLI。
-- Claude/Codex 直接读取 `last_assistant_message` 或 `last-assistant-message`。
-- Codex legacy `agent-turn-complete` 会被跳过，避免与现代 Stop Hook 重复播报。
-- Copilot CLI 只给 `transcriptPath`，hook 读取 JSONL 中最后一条 `assistant.message`。如果最后一条仍是上次已播文本，会用 `~/.config/iSpeak/hook.last` 的 hash 最多等待 4 秒，等最新回复落盘再播。
+- Pi 不走 `hook-speak.sh`，使用 `configs/ispeak.ts` Extension 直接发送 `{source:pi}`。
+
+| 工具 | 接入文件 | 事件/触发 | 读取字段 | 是否读 transcript | 来源前缀 |
+|------|----------|-----------|----------|-------------------|----------|
+| Claude Code | `~/.claude/settings.json` → `hook-speak.sh claude` | `Stop` | `last_assistant_message` | 否 | `{source:claude}` |
+| Codex | `~/.codex/hooks.json` → `hook-speak.sh codex` | `Stop` | `last_assistant_message` | 否 | `{source:codex}` |
+| Copilot CLI | `~/.copilot/hooks/ispeak-hook.json` → `hook-speak.sh copilot` | `agentStop` | `transcriptPath` / `transcript_path` | 是，只取最新 `user.message` 之后的 `assistant.message` | `{source:copilot}` |
+| Pi | `~/.pi/agent/settings.json` → `configs/ispeak.ts` | Extension `agent_end` | `event.messages` 中最后一条 assistant 文本 | 否 | `{source:pi}` |
+
+Claude Code 和 Codex 的 `Stop` hook 都使用官方三层配置结构：事件 → matcher group → command handlers。Codex 脚本正常运行时不向 stdout 输出内容，避免干扰 `Stop` hook 的 JSON stdout 协议。Codex 不再读取 transcript 或 legacy `last-assistant-message`，避免依赖非稳定接口。
+
+Copilot CLI 只给 `transcriptPath`。hook 读取 JSONL 中最新 `user.message` 之后的 `assistant.message`；如果 assistant id 仍是上次已播 id，会用 `~/.config/iSpeak/hook.last` 最多等待 4 秒，等最新回复落盘再播。
 
 ## SSE 解析
 
@@ -134,7 +143,7 @@ type StreamPlayer interface {
 - **HTTP 复用**: 全局 `ttsHTTPClient`，30s 超时，连接池复用
 - **日志轮转**: lumberjack，10MB/份，保留 3 份，压缩归档
 - **优雅退出**: SIGINT/SIGTERM 触发 listener.Close()
-- **Copilot 延迟落盘保护**: hook 记录已播文本 hash，避免只播到倒数第二条回复
+- **Copilot 延迟落盘保护**: hook 记录已播 assistant id，且只取最新用户消息后的回复，避免只播到倒数第二条回复
 - **AVAudioBuffer 生命周期**: `scheduleBuffer` 完成后释放 buffer，长期运行不按 chunk 泄漏
 
 ## 清洗规则
@@ -156,7 +165,7 @@ type StreamPlayer interface {
 ├── config.json      # API Key、音色映射
 ├── ispeak.sock      # Unix Socket
 ├── ispeak.log       # 日志（lumberjack 轮转）
-├── hook.last        # Copilot 最新已播文本 hash
+├── hook.last        # Copilot 最新已播 assistant id（无 id 时回退文本 hash）
 ├── hook-speak.sh    # Claude/Codex/Copilot CLI Hook
 └── ispeak.ts        # Pi Extension
 

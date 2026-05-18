@@ -42,13 +42,27 @@ assert_stdin_extracts "claude direct field" claude \
   '{"last_assistant_message":"Claude 直接字段"}' \
   "Claude 直接字段"
 
-assert_arg_extracts "codex notify argv field" codex \
-  '{"turn-id":"turn-123","last-assistant-message":"Codex 横杠字段"}' \
-  "Codex 横杠字段"
-
 assert_stdin_extracts "codex stop stdin field" codex \
   '{"turn_id":"turn-456","last_assistant_message":"Codex Stop 字段"}' \
   "Codex Stop 字段"
+
+assert_arg_extracts "codex ignores legacy kebab field" codex \
+  '{"turn-id":"turn-123","last-assistant-message":"Codex 横杠字段"}' \
+  ""
+
+cat > "$TMPDIR/codex-events.jsonl" <<'JSONL'
+{"type":"user.message","data":{"content":"检查声音"},"id":"codex-user","timestamp":"2026-05-18T00:00:00Z"}
+{"type":"assistant.message","data":{"content":"Codex transcript 不应播"},"id":"codex-assistant","timestamp":"2026-05-18T00:00:01Z"}
+JSONL
+
+got=$(printf '{"turn_id":"codex-turn-1","transcript_path":"%s/codex-events.jsonl"}' "$TMPDIR" |
+  ISPEAK_HOOK_STATE_FILE="$TMPDIR/hook-test.last" ISPEAK_HOOK_PRINT_TEXT=1 bash "$HOOK" codex)
+if [[ "$got" != "" ]]; then
+  echo "hook fixture failed: codex ignores transcript fallback" >&2
+  echo "want: " >&2
+  echo "got:  $got" >&2
+  exit 1
+fi
 
 # Copilot CLI agentStop: 通过 transcriptPath 读取 JSONL
 cat > "$TMPDIR/events.jsonl" <<'JSONL'
@@ -62,14 +76,16 @@ assert_stdin_extracts "copilot agentStop transcript" copilot \
   "{\"sessionId\":\"s1\",\"transcriptPath\":\"$TMPDIR/events.jsonl\",\"stopReason\":\"end_turn\"}" \
   "Copilot 的回复"
 
-old_hash=$(printf "%s" "上一条 Copilot 回复" | shasum | awk '{print $1}')
-printf "%s" "$old_hash" > "$TMPDIR/hook.last"
+printf "%s" "old-assistant" > "$TMPDIR/hook.last"
 cat > "$TMPDIR/delayed-events.jsonl" <<'JSONL'
-{"type":"assistant.message","data":{"content":"上一条 Copilot 回复"},"id":"old","timestamp":"2026-05-14T00:00:01Z"}
+{"type":"user.message","data":{"content":"上一轮用户"},"id":"old-user","timestamp":"2026-05-14T00:00:00Z"}
+{"type":"assistant.message","data":{"content":"上一条 Copilot 回复"},"id":"old-assistant","timestamp":"2026-05-14T00:00:01Z"}
+{"type":"assistant.turn_end","data":{},"id":"old-end","timestamp":"2026-05-14T00:00:01Z","parentId":"old-assistant"}
+{"type":"user.message","data":{"content":"当前用户"},"id":"new-user","timestamp":"2026-05-14T00:00:02Z"}
 JSONL
 (
   sleep 0.3
-  printf '%s\n' '{"type":"assistant.message","data":{"content":"当前 Copilot 回复"},"id":"new","timestamp":"2026-05-14T00:00:02Z"}' >> "$TMPDIR/delayed-events.jsonl"
+  printf '%s\n' '{"type":"assistant.message","data":{"content":"当前 Copilot 回复"},"id":"new-assistant","timestamp":"2026-05-14T00:00:03Z"}' >> "$TMPDIR/delayed-events.jsonl"
 ) &
 delayed_pid=$!
 got=$(printf '{"sessionId":"s2","transcriptPath":"%s/delayed-events.jsonl","stopReason":"end_turn"}' "$TMPDIR" |
@@ -78,6 +94,20 @@ wait "$delayed_pid"
 if [[ "$got" != "当前 Copilot 回复" ]]; then
   echo "hook fixture failed: copilot waits for fresh transcript append" >&2
   echo "want: 当前 Copilot 回复" >&2
+  echo "got:  $got" >&2
+  exit 1
+fi
+
+printf "%s" "repeat-old" > "$TMPDIR/repeat.last"
+cat > "$TMPDIR/repeat-events.jsonl" <<'JSONL'
+{"type":"user.message","data":{"content":"再说一次"},"id":"repeat-user","timestamp":"2026-05-14T00:00:04Z"}
+{"type":"assistant.message","data":{"content":"同一句回复"},"id":"repeat-new","timestamp":"2026-05-14T00:00:05Z"}
+JSONL
+got=$(printf '{"sessionId":"s3","transcriptPath":"%s/repeat-events.jsonl","stopReason":"end_turn"}' "$TMPDIR" |
+  ISPEAK_HOOK_STATE_FILE="$TMPDIR/repeat.last" ISPEAK_HOOK_PRINT_TEXT=1 bash "$HOOK" copilot)
+if [[ "$got" != "同一句回复" ]]; then
+  echo "hook fixture failed: copilot uses assistant id instead of text hash" >&2
+  echo "want: 同一句回复" >&2
   echo "got:  $got" >&2
   exit 1
 fi

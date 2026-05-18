@@ -2,8 +2,8 @@
 # Claude Code / Codex / Copilot CLI 共用播报 Hook（Pi 走 ispeak.ts Extension）
 # 取最后一条 assistant 消息，加 {source:<name>} 前缀后发给 ispeakd。
 # Claude:  payload.last_assistant_message (snake_case)
-# Codex:   payload["last-assistant-message"] (kebab-case)
-# Copilot: payload.transcriptPath → 读取 JSONL，取最后 assistant.message.content
+# Codex:   payload.last_assistant_message (Stop)
+# Copilot: payload.transcriptPath → 读取最新 user.message 之后的 assistant.message.content
 [[ "$ISPEAK_SKIP" == "1" ]] && exit 0
 
 SOURCE="${1:-claude}"
@@ -28,22 +28,19 @@ const crypto = require("crypto");
   const payload = parseJSON(input) || {};
   const source = process.env.SOURCE || "";
 
-  // Codex Stop hook 会在 agent-turn-complete 事件中重复触发，跳过
-  if (payload.type === "agent-turn-complete") return;
+  // Claude / Codex: 直接从官方 Stop payload 取 last_assistant_message
+  const text = payload.last_assistant_message || "";
 
-  // Claude / Codex: 直接从 payload 取 last_assistant_message
-  const text = payload.last_assistant_message
-    || payload["last-assistant-message"]
-    || "";
+  if (text) {
+    rememberSpoken(source, payload, text);
+    process.stdout.write(text);
+    return;
+  }
 
-  if (text) { process.stdout.write(text); return; }
-
-  // Copilot CLI agentStop: 从 transcriptPath 读取最后 assistant.message
-  const transcriptPath = payload.transcriptPath || payload.transcript_path;
-  if (transcriptPath) {
-    const lastText = source === "copilot"
-      ? waitForFreshTranscriptText(transcriptPath)
-      : extractFromTranscript(transcriptPath);
+  // Copilot CLI agentStop: 从 transcriptPath 读取最新 user.message 后的 assistant.message
+  if (source === "copilot") {
+    const transcriptPath = payload.transcriptPath || payload.transcript_path;
+    const lastText = transcriptPath ? waitForFreshCopilotTranscriptText(transcriptPath) : "";
     if (lastText) process.stdout.write(lastText);
   }
 })();
@@ -64,43 +61,66 @@ function contentText(content) {
   if (content.content) return contentText(content.content);
   return "";
 }
-function extractFromTranscript(path) {
+function extractLatestCopilotAssistant(path) {
   try {
     const lines = fs.readFileSync(path, "utf8").split("\n");
-    let lastText = "";
+    const events = [];
     for (const line of lines) {
       if (!line.trim()) continue;
       const event = parseJSON(line);
-      if (!event || event.type !== "assistant.message") continue;
+      if (event) events.push(event);
+    }
+
+    let lastUserIndex = -1;
+    for (let i = 0; i < events.length; i++) {
+      if (events[i].type === "user.message") lastUserIndex = i;
+    }
+
+    let lastText = "";
+    let lastId = "";
+    for (let i = lastUserIndex + 1; i < events.length; i++) {
+      const event = events[i];
+      if (event.type !== "assistant.message") continue;
       const data = event.data || {};
       const content = contentText(data.content || "");
-      if (content) lastText = content;
+      if (content) {
+        lastText = content;
+        lastId = event.id || "";
+      }
     }
-    return lastText;
-  } catch { return ""; }
+
+    return { text: lastText, id: lastId };
+  } catch { return { text: "", id: "" }; }
 }
-function waitForFreshTranscriptText(path) {
+function waitForFreshCopilotTranscriptText(path) {
   const stateFile = process.env.HOOK_STATE_FILE || "";
   const previous = readFile(stateFile).trim();
   const deadline = Date.now() + Number(process.env.ISPEAK_COPILOT_TRANSCRIPT_WAIT_MS || 4000);
-  let lastText = "";
 
   while (Date.now() <= deadline) {
-    lastText = extractFromTranscript(path);
-    if (lastText && textHash(lastText) !== previous) {
-      saveState(stateFile, lastText);
-      return lastText;
+    const latest = extractLatestCopilotAssistant(path);
+    const current = latest.id || textHash(latest.text);
+    if (latest.text && current !== previous) {
+      saveState(stateFile, current);
+      return latest.text;
     }
     sleepMs(120);
   }
 
   return "";
 }
-function saveState(file, text) {
+function rememberSpoken(source, payload, text) {
+  saveState(process.env.HOOK_STATE_FILE || "", stateKey(source, payload, text, ""));
+}
+function stateKey(source, payload, text, eventId) {
+  const turnId = payload["turn-id"] || payload.turn_id || payload.turnId || "";
+  return [source || "unknown", turnId || eventId || textHash(text)].join(":");
+}
+function saveState(file, value) {
   if (!file) return;
   try {
     fs.mkdirSync(require("path").dirname(file), { recursive: true });
-    fs.writeFileSync(file, textHash(text), "utf8");
+    fs.writeFileSync(file, value, "utf8");
   } catch {}
 }
 function textHash(text) {

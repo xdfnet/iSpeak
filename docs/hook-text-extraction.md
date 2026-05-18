@@ -8,7 +8,6 @@
 |------|------|------|------|
 | Claude Code | `Stop` | `last_assistant_message` | 直接提取 |
 | Codex | `Stop` | `last_assistant_message` | 直接提取 |
-| Codex legacy notify | `agent-turn-complete` | `last-assistant-message` | 跳过，避免重复播报 |
 | Copilot CLI | `agentStop` | `transcriptPath` / `transcript_path` | 读 JSONL，等待最新 `assistant.message` 落盘 |
 
 脚本统一处理 stdin 和 argv：
@@ -23,19 +22,13 @@ fi
 ## 提取逻辑
 
 ```js
-if (payload.type === "agent-turn-complete") return;
-
-const text = payload.last_assistant_message
-  || payload["last-assistant-message"]
-  || "";
+const text = payload.last_assistant_message || "";
 
 if (text) return text;
 
-const transcriptPath = payload.transcriptPath || payload.transcript_path;
-if (transcriptPath) {
-  return source === "copilot"
-    ? waitForFreshTranscriptText(transcriptPath)
-    : extractFromTranscript(transcriptPath);
+if (source === "copilot") {
+  const transcriptPath = payload.transcriptPath || payload.transcript_path;
+  if (transcriptPath) return waitForFreshCopilotTranscriptText(transcriptPath);
 }
 ```
 
@@ -45,9 +38,10 @@ Copilot CLI 的 `agentStop` 不直接提供 `last_assistant_message`，只提供
 
 当前策略：
 
-- 从 transcript 中读取最后一条 `assistant.message.data.content`
-- 把已播文本的 SHA-1 hash 写入 `~/.config/iSpeak/hook.last`
-- 下次 Copilot hook 触发时，如果最后一条文本 hash 仍等于 `hook.last`，说明 transcript 还没更新
+- 先定位 transcript 中最后一条 `user.message`
+- 只读取这条用户消息之后的 `assistant.message.data.content`
+- 把已播 assistant 的 `id` 写入 `~/.config/iSpeak/hook.last`，无 `id` 时回退 SHA-1 文本 hash
+- 下次 Copilot hook 触发时，如果最新 assistant id 仍等于 `hook.last`，说明当前轮回复还没更新
 - 每 120ms 轮询一次，最多等待 4 秒
 - 读到新的 assistant 文本后更新 `hook.last` 并播报
 - 超时仍没有新文本则跳过，避免重复播上一条
@@ -72,13 +66,19 @@ ISPEAK_SKIP=1                                 # 跳过 hook
   "hooks": {
     "Stop": [
       {
-        "type": "command",
-        "command": "bash ~/.config/iSpeak/hook-speak.sh claude"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/.config/iSpeak/hook-speak.sh claude"
+          }
+        ]
       }
     ]
   }
 }
 ```
+
+Claude Code 官方 hook 是三层结构：事件 → matcher group → handlers。`Stop` 会提供 `last_assistant_message`，不需要读取 transcript。
 
 ### Codex
 
@@ -89,15 +89,20 @@ ISPEAK_SKIP=1                                 # 跳过 hook
   "hooks": {
     "Stop": [
       {
-        "type": "command",
-        "command": "bash /Users/admin/.config/iSpeak/hook-speak.sh codex"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /Users/admin/.config/iSpeak/hook-speak.sh codex",
+            "timeout": 30
+          }
+        ]
       }
     ]
   }
 }
 ```
 
-Codex 首次加载新 Stop hook 时需要在 `/hooks` 中信任。
+Codex 官方 hook 是三层结构：事件 → matcher group → handlers。`Stop` 的 `matcher` 当前会被忽略，可省略。Codex 首次加载新 Stop hook 时需要在 `/hooks` 中信任。iSpeak 只读取官方 `last_assistant_message` 字段，不再读取 Codex transcript 或旧版 `last-assistant-message`。
 
 ### Copilot CLI
 
@@ -204,3 +209,4 @@ bash scripts/test-hook-speak.sh
 - v2：简化为 direct 字段提取，去掉宽泛 `payload.message` 回退，避免误播。
 - v3：新增 Copilot `agentStop`，从 `transcriptPath` 读取 JSONL。
 - v4：为 Copilot 增加 `hook.last` 文本 hash 和短轮询，避免只播倒数第二条回复。
+- v5：Copilot 改为只取最新 `user.message` 之后的 assistant，并优先用 assistant id 去重，避免重复文本被误判为旧回复。
